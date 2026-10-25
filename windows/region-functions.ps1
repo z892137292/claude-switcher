@@ -79,11 +79,13 @@ function Get-RegionInfo {
     $iana = if ($info -and $info.timezone) { [string]$info.timezone } else { '' }
     $ip = if ($info -and $info.ip) { [string]$info.ip } else { '' }
     $org = if ($info -and $info.org) { [string]$info.org } else { '' }
-    if (-not $country) {
+    if (-not $country -or -not $ip) {
         try {
             $trace = & curl.exe -s --max-time 8 'https://www.cloudflare.com/cdn-cgi/trace' 2>$null
-            $country = (($trace -split "`n" | Where-Object { $_ -match '^loc=' } | Select-Object -First 1) -replace '^loc=','').Trim()
-            $ip = (($trace -split "`n" | Where-Object { $_ -match '^ip=' } | Select-Object -First 1) -replace '^ip=','').Trim()
+            if ($LASTEXITCODE -eq 0 -and $trace) {
+                if (-not $country) { $country = (($trace -split "`n" | Where-Object { $_ -match '^loc=' } | Select-Object -First 1) -replace '^loc=','').Trim() }
+                if (-not $ip) { $ip = (($trace -split "`n" | Where-Object { $_ -match '^ip=' } | Select-Object -First 1) -replace '^ip=','').Trim() }
+            }
         } catch {}
     }
     if (-not $iana) {
@@ -103,14 +105,42 @@ function Get-RegionInfo {
         Write-Warning "无法将 IANA 时区 '$iana' 映射为 Windows 时区；保持当前时区不变。"
     }
     return [pscustomobject]@{
-        country=$country; ip=$ip; org=$org; tz_windows=$tzWindows; tz_iana=$iana
+        country=$country; ip=$ip; exit_ip=$ip; org=$org; asn=$org; tz_windows=$tzWindows; tz_iana=$iana
         culture=$culture; updated_at=(Get-Date).ToString('o')
     }
 }
 
 function Save-RegionInfo($region, [string]$path) {
-    $region | Select-Object country,tz_windows,tz_iana,culture,updated_at |
-        ConvertTo-Json | Set-Content -Path $path -Encoding UTF8
+    $exitIp = if ($region.exit_ip) { [string]$region.exit_ip } else { [string]$region.ip }
+    $lockedAt = if ($region.locked_at) { [string]$region.locked_at } else { (Get-Date).ToString('o') }
+    [pscustomobject]@{
+        exit_ip=$exitIp; country=$region.country; tz_iana=$region.tz_iana; tz_windows=$region.tz_windows
+        culture=$region.culture; locked_at=$lockedAt; asn=$region.asn
+    } | ConvertTo-Json | Set-Content -Path $path -Encoding UTF8
+}
+
+function Protect-ExitIp([string]$ip) {
+    if ($ip -match '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') { return "$($Matches[1]).$($Matches[2]).*.*" }
+    if ($ip -match ':') { return (($ip -split ':')[0..([Math]::Min(1, ($ip -split ':').Count - 1))] -join ':') + ':*' }
+    return '未知'
+}
+
+function Test-RegionEgressMatch([string]$currentIp, [string]$currentCountry, $lockedRegion) {
+    $expectedIp = if ($lockedRegion) { [string]$lockedRegion.exit_ip } else { '' }
+    $expectedCountry = if ($lockedRegion) { ([string]$lockedRegion.country).ToUpperInvariant() } else { '' }
+    $ipOk = $currentIp -and $expectedIp -and ($currentIp -ceq $expectedIp)
+    $countryOk = $currentCountry -and $expectedCountry -and (([string]$currentCountry).ToUpperInvariant() -ceq $expectedCountry)
+    $reason = ''
+    if (-not $lockedRegion -or -not $expectedIp -or -not $expectedCountry) { $reason = '基准环境缺少锁定出口IP或国家' }
+    elseif (-not $currentIp -or -not $currentCountry) { $reason = '无法获取当前出口IP或国家' }
+    elseif (-not $ipOk) { $reason = "出口IP偏离：当前 $(Protect-ExitIp $currentIp)，期望 $(Protect-ExitIp $expectedIp)" }
+    elseif (-not $countryOk) { $reason = "出口国家偏离：当前 $currentCountry，期望 $expectedCountry" }
+    return [pscustomobject]@{ passed=[bool]($ipOk -and $countryOk); ip_ok=[bool]$ipOk; country_ok=[bool]$countryOk; reason=$reason }
+}
+
+function Get-EgressMismatchDecision([int]$previousCount, [bool]$isMismatch, [int]$threshold = 2) {
+    $count = if ($isMismatch) { $previousCount + 1 } else { 0 }
+    return [pscustomobject]@{ count=$count; blocked=($count -ge $threshold) }
 }
 
 function Apply-RegionUserSettings($region) {
