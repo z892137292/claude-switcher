@@ -6,212 +6,49 @@ on:
       - windows-executable-build
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup PowerShell environment
+
+      - name: Install ps2exe
         shell: pwsh
         run: |
-          # Install ps2exe via nuget
-          nuget install ps2exe -o "$env:TEMP\packages"
-          $ps2exe = Get-ChildItem "$env:TEMP\packages" -Filter "ps2exe.exe" -Recurse | Select-Object -First 1
-          echo "PS2EXE_PATH=$($ps2exe.FullName)" >> $env:GITHUB_ENV
-      
-      - name: Compile SwitcherUI to EXE
+          Install-Module -Name ps2exe -Scope CurrentUser -Force -AllowClobber
+          Import-Module ps2exe
+          Get-Command Invoke-ps2exe
+
+      - name: Build EXE and package
         shell: pwsh
         run: |
-          $source = "${{ github.workspace }}\windows\SwitcherUI.ps1"
-          $output = "${{ github.workspace }}\windows\dist\Claude切换器.exe"
-          
-          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\windows\dist" | Out-Null
-          
-          # Create wrapper that ensures proper execution context
-          $wrapper = @"
-          `$ErrorActionPreference = 'Stop'
-          `$BASE = Join-Path `$env:USERPROFILE ".claude-switcher"
-          if (-not (Test-Path `$BASE)) {
-              Write-Host "首次运行：请先运行安装程序 install.ps1" -ForegroundColor Red
-              pause
-              exit 1
+          $dist = Join-Path $PWD 'dist\Claude-Switcher-Windows'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+          Invoke-ps2exe -inputFile 'windows\SwitcherUI.ps1' -outputFile "$dist\Claude-Switcher.exe" -noConsole -STA -x64 -title 'Claude Switcher' -version '1.0.0.0'
+          if (-not (Test-Path "$dist\Claude-Switcher.exe")) { throw 'EXE build failed' }
+
+          foreach ($f in 'install.ps1','install.bat','claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','README.md') {
+            Copy-Item "windows\$f" $dist -Force
           }
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$BASE\SwitcherUI.ps1"
-          "@
-          
-          $wrapperPath = "${{ github.workspace }}\windows\SwitcherUI-wrapper.ps1"
-          $wrapper | Out-File -Encoding utf8 -NoNewline $wrapperPath
-          
-          # Use ps2exe to compile
-          & "$env:PS2EXE_PATH" -inputFile $wrapperPath -outputFile $output -iconFile "${{ github.workspace }}\assets\icon-2048.png" -noConsole -x64
-          
-          if (Test-Path $output) {
-              Write-Host "✓ 编译成功: $output" -ForegroundColor Green
-              Get-Item $output | Select-Object FullName, Length
-          } else {
-              Write-Host "✗ 编译失败" -ForegroundColor Red
-              exit 1
-          }
-      
-      - name: Package installation files
-        shell: pwsh
-        run: |
-          $distDir = "${{ github.workspace }}\windows\dist"
-          
-          # Copy core scripts
-          Copy-Item "${{ github.workspace }}\windows\install.ps1" "$distDir\install.ps1"
-          Copy-Item "${{ github.workspace }}\windows\claude-switch.ps1" "$distDir\claude-switch.ps1"
-          Copy-Item "${{ github.workspace }}\windows\SwitcherUI.ps1" "$distDir\SwitcherUI.ps1"
-          Copy-Item "${{ github.workspace }}\windows\claude-bodyguard.ps1" "$distDir\claude-bodyguard.ps1"
-          Copy-Item "${{ github.workspace }}\windows\README.md" "$distDir\README.md"
-          
-          # Create launcher batch file
-          $launcher = @"
-          @echo off
-          chcp 65001 > nul
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "claude-switch.ps1" checkdetail
-          pause
-          "@
-          
-          $launcher | Out-File -Encoding utf8 "$distDir\launcher.bat"
-          
-          # Create convenient shortcuts
-          $shortcut = @"
-          `$ws = New-Object -ComObject WScript.Shell
-          `$sc = `$ws.CreateShortcut("`$env:USERPROFILE\Desktop\Claude切换器.lnk")
-          `$sc.TargetPath = "$(Join-Path $distDir 'Claude切换器.exe')"
-          `$sc.WorkingDirectory = "$(Join-Path $distDir '..')"
-          `$sc.Save()
-          Write-Host "✓ 桌面快捷方式已创建"
-          "@
-          
-          $shortcut | Out-File -Encoding utf8 "$distDir\create-shortcut.ps1"
-          
-          # Create comprehensive README for distribution
-          $readme = @"
-# Claude 切换器 · Windows 版 (编译版)
 
-## 快速开始
+          Compress-Archive -Path $dist -DestinationPath 'dist\Claude-Switcher-Windows.zip' -Force
+          Get-ChildItem dist -Recurse | Select-Object FullName, Length
 
-### 方式 1: 自动安装（推荐）
-1. 右键点击 \`install.ps1\` → "使用 PowerShell 以管理员身份运行"
-2. 按提示完成安装
-3. 桌面将出现"Claude切换器"快捷方式
-
-### 方式 2: 使用 EXE 程序
-1. 双击 \`Claude切换器.exe\`
-2. 首次运行会要求完成安装
-
-## 系统要求
-- Windows 10/11 (64位)
-- PowerShell 5.1+（Windows 自带）
-- 代理客户端（支持 TUN 模式）：Clash Verge、sing-box、ClashX、Surge、WireGuard 等
-- Claude 桌面版
-
-## 功能特性
-✓ 14项环境安全审计（Block-on-Fail）
-✓ WebRTC泄漏检测（手写STUN探针）
-✓ Kill-Switch断网急停
-✓ 多账号快照隔离（A/B账号切换）
-✓ 配置漂移自愈（Watchdog）
-✓ 置顶路由规则
-
-## 已知限制
-- 设备指纹体检暂未在Windows版内置（可用Web版检查）
-- 账号切换前需确保Claude已完全退出
-- 非Clash客户端的规则置顶需手动维护
-
-## 卸载
-1. 删除任务计划中的 "ClaudeBodyguard"
-2. 删除 \`%USERPROFILE%\.claude-switcher\` 目录
-3. 删除桌面快捷方式
-
-## 更新日志
-- v1.0.0: 初版发布，支持Windows 10/11
-
-## 问题反馈
-访问 https://github.com/z892137292/claude-switcher/issues
-
----
-**License**: MIT © Claude Switcher Contributors
-"@
-          
-          $readme | Out-File -Encoding utf8 "$distDir\使用说明.txt"
-          
-          Write-Host "✓ 文件打包完成" -ForegroundColor Green
-          Get-ChildItem $distDir | Select-Object Name, Length
-      
-      - name: Create portable ZIP package
-        shell: pwsh
-        run: |
-          $distDir = "${{ github.workspace }}\windows\dist"
-          $zipPath = "${{ github.workspace }}\windows\Claude-Switcher-Windows-portable.zip"
-          
-          # Create ZIP with proper compression
-          Compress-Archive -Path $distDir -DestinationPath $zipPath -Force
-          
-          if (Test-Path $zipPath) {
-              $size = (Get-Item $zipPath).Length / 1MB
-              Write-Host "✓ ZIP包创建成功: $zipPath ($([Math]::Round($size, 2))MB)" -ForegroundColor Green
-          }
-      
-      - name: Calculate checksums
-        shell: pwsh
-        run: |
-          $distDir = "${{ github.workspace }}\windows\dist"
-          $checksumFile = "$distDir\SHA256SUMS.txt"
-          
-          Get-ChildItem $distDir -File | ForEach-Object {
-              $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash
-              "$hash  $($_.Name)" | Out-File -Append -Encoding utf8 $checksumFile
-          }
-          
-          Write-Host "✓ 校验和已生成" -ForegroundColor Green
-          Get-Content $checksumFile
-      
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            ${{ github.workspace }}\windows\dist/**/*
-            ${{ github.workspace }}\windows\Claude-Switcher-Windows-portable.zip
-          draft: false
-          prerelease: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: Claude-Switcher-Windows
-          path: ${{ github.workspace }}\windows\dist/
+          path: dist/Claude-Switcher-Windows.zip
           retention-days: 30
 
-      - name: Generate build summary
-        shell: pwsh
-        run: |
-          $distDir = "${{ github.workspace }}\windows\dist"
-          $files = Get-ChildItem $distDir -File
-          
-          $summary = @"
-          # 📦 Windows 版编译完成
-          
-          ## 生成的文件
-          $(($files | ForEach-Object { "- $($_.Name) ($([Math]::Round($_.Length / 1KB, 1))KB)" }) -join "`n")
-          
-          ## 快速安装
-          1. 右键 install.ps1 → "使用 PowerShell 以管理员身份运行"
-          2. 按提示完成配置
-          3. 双击桌面快捷方式使用
-          
-          ## 便携版ZIP
-          - 文件: Claude-Switcher-Windows-portable.zip
-          - 可直接解压到任何目录使用
-          
-          ## 校验信息
-          所有文件已生成SHA256校验和，位于 SHA256SUMS.txt
-          "@
-          
-          Write-Host $summary
+      - name: Publish prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-beta-${{ github.run_number }}
+          name: Windows Beta ${{ github.run_number }}
+          prerelease: true
+          files: dist/Claude-Switcher-Windows.zip
