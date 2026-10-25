@@ -15,6 +15,7 @@ $DATA = Join-Path $env:APPDATA "Claude"
 $LOG  = Join-Path $BASE "claude-switch.log"
 $REGION_FILE = Join-Path $BASE "region.json"
 . (Join-Path $PSScriptRoot "region-functions.ps1")
+. (Join-Path $PSScriptRoot "code-functions.ps1")
 $CLASH_DIR = @(
     (Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev"),
     (Join-Path $env:LOCALAPPDATA "io.github.clash-verge-rev.clash-verge-rev")
@@ -142,8 +143,8 @@ function Invoke-SetRegion([switch]$Confirmed) {
         $region.tz_windows = (Get-TimeZone).Id
         "WARN:无法识别出口时区 $($region.tz_iana)，保留当前时区 $($region.tz_windows)"
     }
-    if (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue) {
-        "FAIL:请先完全退出 Claude，再重新锁定出口环境"; return
+    if (@(Get-ManagedCodeSessions).Count -gt 0 -or ((Get-LaunchMode) -eq 'desktop' -and (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue))) {
+        "FAIL:请先退出本工具启动的 Claude Code/Claude 会话，再重新锁定出口环境"; return
     }
     if (-not $Confirmed) {
         if ([Console]::IsInputRedirected) { "FAIL:非交互场景必须显式指定 --confirm"; return }
@@ -335,6 +336,10 @@ prepend-rules:
 }
 
 function Invoke-Status {
+    if ((Get-LaunchMode) -eq 'code') {
+        $cur = if (Test-Path "$BASE/code-current.txt") { (Get-Content "$BASE/code-current.txt" -Raw).Trim() } else { 'none' }
+        "mode=code current=$cur"; return
+    }
     $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
     $hasA = if (Test-Path "$BASE\accounts\A") { 1 } else { 0 }
     $hasB = if (Test-Path "$BASE\accounts\B") { 1 } else { 0 }
@@ -388,8 +393,52 @@ function Start-ClaudeApp {
     }
 }
 
+function Invoke-CodePreflight {
+    if (-not (Test-ProxyAlive) -or -not (Test-TunUp)) { throw '代理内核或TUN未运行' }
+    $locked = try { Get-Content $REGION_FILE -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { $null }
+    $now = Get-Egress
+    $match = Test-RegionEgressMatch $now.ip $now.loc $locked
+    if (-not $match.passed) { throw "启动前出口检查失败：$($match.reason)" }
+    $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction Stop
+    if ($bg.State -ne 'Running') { throw '保镖未运行' }
+    'OK:code-preflight'
+}
+
+function Invoke-CodeLaunch([string]$account) {
+    $null = Resolve-CodeCommand
+    $settings = Get-LaunchSettings
+    if (-not (Test-Path -LiteralPath $settings.workspace -PathType Container)) { throw '项目目录不存在，请先选择项目' }
+    $checks = Test-CheckReport @(Invoke-CheckDetail)
+    if (-not $checks.passed) { throw "安全检查未通过：$($checks.errors -join '; ')" }
+    $runs = Join-Path $BASE 'code-runs'
+    New-Item -ItemType Directory -Path $runs -Force | Out-Null
+    $runId = [guid]::NewGuid().ToString('N')
+    $runner = Join-Path $PSScriptRoot 'code-session.ps1'
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw '缺少 code-session.ps1，请从完整新版重新安装' }
+    $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -Account {1} -RunId {2}' -f $runner,$account,$runId
+    $terminal = Start-Process powershell.exe -ArgumentList $arguments -WorkingDirectory $settings.workspace -PassThru -ErrorAction Stop
+    $runFile = Join-Path $runs "$runId.json"
+    for ($attempt=0; $attempt -lt 60; $attempt++) {
+        if (Test-Path -LiteralPath $runFile) {
+            $state = try { Get-Content -LiteralPath $runFile -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { $null }
+            if ($state.status -eq 'running') {
+                $account | Set-Content -LiteralPath (Join-Path $BASE 'code-current.txt') -Encoding ascii -NoNewline
+                "OK:已打开 Claude Code 配置 $account；请在新终端查看登录和运行结果"; return
+            }
+            if ($state.status -in @('failed','exited')) { throw 'Claude Code 会话已退出或启动失败，请查看终端/重新检查安装' }
+        }
+        if ($terminal.HasExited) { throw 'Claude Code 终端已退出，未确认启动成功' }
+        Start-Sleep -Milliseconds 250
+    }
+    # A slow preflight must not start Code later after the UI has reported failure.
+    $terminal.Refresh()
+    if (-not $terminal.HasExited) { Stop-Process -Id $terminal.Id -Force -ErrorAction SilentlyContinue }
+    throw 'Claude Code 启动确认超时；已请求停止本次启动，请重新检查'
+}
+
 function Invoke-Switch($target) {
     if ($target -notin @('A','B')) { "FAIL:目标账号必须是 A 或 B"; return }
+    if ((Get-LaunchMode) -eq 'code') { Invoke-CodeLaunch $target; return }
     $targetArchive = "$BASE\accounts\$target"
     if ((Test-Path "$targetArchive.new") -or ((Test-Path "$targetArchive.previous") -and -not (Test-Path $targetArchive))) {
         "FAIL:账号$target 存在待恢复快照(.new/.previous)，请先确认并手动处理"; return
@@ -477,6 +526,14 @@ switch ($args[0]) {
         $r
     }
     'status' { Invoke-Status }
+    'code-preflight' { try { Invoke-CodePreflight } catch { "FAIL:$($_.Exception.Message)" } }
+    'set-project' { try { Set-CodeWorkspace $args[1]; 'OK:项目目录已保存' } catch { "FAIL:$($_.Exception.Message)"; exit 1 } }
+    'set-mode' {
+        if ($args[1] -notin @('code','desktop')) { 'FAIL:模式必须是 code 或 desktop'; exit 1 }
+        $settings = Get-LaunchSettings
+        $settings | Add-Member -NotePropertyName mode -NotePropertyValue $args[1] -Force
+        Save-LaunchSettings $settings; "OK:启动模式=$($args[1])"
+    }
     'fix'    { Invoke-Fix }
     'switch' {
         $mutex = New-Object System.Threading.Mutex -ArgumentList $false, 'Local\ClaudeSwitcherAccountMutation'

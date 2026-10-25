@@ -3,6 +3,7 @@
 $ErrorActionPreference = 'Stop'
 $BASE = "$env:USERPROFILE\.claude-switcher"
 . "$PSScriptRoot\region-functions.ps1"
+. "$PSScriptRoot\code-functions.ps1"
 $CLASH_DIR = @(
     "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev",
     "$env:LOCALAPPDATA\io.github.clash-verge-rev.clash-verge-rev"
@@ -14,6 +15,7 @@ Write-Host "==================================" -ForegroundColor Cyan
 Write-Host ""
 
 # ---- 0. 前置检查 + 代理客户端探测 ----
+$null = Resolve-CodeCommand
 $PROXY_MODE = $null
 if ($CLASH_DIR) {
     $PROXY_MODE = 'clash-verge'
@@ -79,7 +81,7 @@ if (Test-Path $regionPath) {
     if (-not $match.passed) { throw "现有基准不匹配：$($match.reason)。请退出 Claude 后使用原安装的 set-region 主动重新锁定；安装器不会覆盖基准。" }
     $region = $savedRegion
 } else {
-    if (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue) { throw '首次锁定前请先完全退出 Claude' }
+    if (@(Get-ManagedCodeSessions).Count -gt 0) { throw '首次锁定前请先退出本工具启动的 Claude Code' }
     Save-RegionInfo $region $regionPath
 }
 Write-Host "[OK] 地区目标: $($region.country) / $($region.tz_iana) / $($region.culture)" -ForegroundColor Green
@@ -101,12 +103,18 @@ if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
 }
 
 # ---- 4. 安装文件 ----
+
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 Copy-Item "$PSScriptRoot\claude-switch.ps1"   "$BASE\claude-switch.ps1" -Force
 Copy-Item "$PSScriptRoot\SwitcherUI.ps1"      "$BASE\SwitcherUI.ps1" -Force
 Copy-Item "$PSScriptRoot\claude-bodyguard.ps1" "$BASE\claude-bodyguard.ps1" -Force
 Copy-Item "$PSScriptRoot\claude-region-watchdog.ps1" "$BASE\claude-region-watchdog.ps1" -Force
 Copy-Item "$PSScriptRoot\region-functions.ps1" "$BASE\region-functions.ps1" -Force
+Copy-Item "$PSScriptRoot\code-functions.ps1" "$BASE\code-functions.ps1" -Force
+Copy-Item "$PSScriptRoot\code-session.ps1" "$BASE\code-session.ps1" -Force
+$launch = Get-LaunchSettings
+$launch | Add-Member -NotePropertyName mode -NotePropertyValue 'code' -Force
+Save-LaunchSettings $launch
 
 # 仅写入代理模式和代理组；国家/时区/地区格式保存在 region.json
 $core = Get-Content "$BASE\claude-switch.ps1" -Raw
@@ -196,7 +204,7 @@ if ($PROXY_MODE -eq 'clash-verge') {
 Write-Host ""
 Write-Host "==================================" -ForegroundColor Green
 Write-Host "  安装完成! 双击桌面「Claude切换器」使用" -ForegroundColor Green
-Write-Host "  首次使用: 打开后选账号A(自动收编当前登录)" -ForegroundColor Green
+Write-Host "  首次使用: 选择项目，再选 Code A(原有配置) 或 Code B(独立登录)" -ForegroundColor Green
 Write-Host "==================================" -ForegroundColor Green
 $checkOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$BASE\claude-switch.ps1" checkdetail 2>&1
 Write-Host "`n安装后安全检查：" -ForegroundColor Cyan

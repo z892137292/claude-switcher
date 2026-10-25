@@ -51,6 +51,7 @@ function Get-GuardFailure {
 $helper = Join-Path $PSScriptRoot 'region-functions.ps1'
 if (-not (Test-Path $helper)) { throw '缺少 region-functions.ps1，请重新安装；保镖未启动' }
 . $helper
+. (Join-Path $PSScriptRoot 'code-functions.ps1')
 $lastReason = ''
 while ($true) {
     $reason = Get-GuardFailure
@@ -58,7 +59,16 @@ while ($true) {
         if ($reason -ne $lastReason) {
             "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $reason" | Out-File -Append -Encoding utf8 $LOG
         }
-        $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
+        try {
+            if (@(Get-ManagedCodeSessions).Count -gt 0) {
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 请求关闭受管理的 Claude Code 会话: $reason" | Out-File -Append -Encoding utf8 $LOG
+            }
+            Stop-ManagedCodeSessions
+        } catch {
+            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') Code 会话关闭未完成，请立即检查" | Out-File -Append -Encoding utf8 $LOG
+        }
+        $mode = try { Get-LaunchMode } catch { 'code' }
+        $p = if ($mode -eq 'desktop') { Get-Process -Name 'Claude' -ErrorAction SilentlyContinue } else { $null }
         if ($p) {
             $p | Stop-Process -Force
             "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 已请求关闭 Claude: $reason" | Out-File -Append -Encoding utf8 $LOG

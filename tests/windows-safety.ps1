@@ -26,6 +26,8 @@ try {
         Assert ($bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) "Missing UTF-8 BOM: $file"
     }
     . (Join-Path $root 'windows/region-functions.ps1')
+    . (Join-Path $root 'windows/code-functions.ps1')
+    function Get-LaunchMode { return 'desktop' }
     function curl.exe {
         $global:LASTEXITCODE = 0
         if ($script:mode -eq 'offline') { $global:LASTEXITCODE=28; return }

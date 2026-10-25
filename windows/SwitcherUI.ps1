@@ -5,12 +5,13 @@ Add-Type -AssemblyName WindowsBase
 
 $BASE = "$env:USERPROFILE\.claude-switcher"
 $CORE = "$BASE\claude-switch.ps1"
-. (Join-Path $PSScriptRoot 'region-functions.ps1')
+. (Join-Path $BASE 'region-functions.ps1')
+. (Join-Path $BASE 'code-functions.ps1')
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Claude 账号切换器" Width="540" Height="980" ResizeMode="CanResize"
+        Title="Claude Code 环境启动器" Width="540" Height="980" ResizeMode="CanResize"
         WindowStartupLocation="CenterScreen" Background="#FF12141D" Foreground="White">
     <Grid Margin="20">
         <Grid.RowDefinitions>
@@ -28,8 +29,8 @@ $xaml = @"
                 <TextBlock Text="盾" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="20" Foreground="White"/>
             </Border>
             <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
-                <TextBlock Text="Claude 账号切换器" FontSize="18" FontWeight="Bold"/>
-                <TextBlock Text="安全检查 · 切换 · 启动" FontSize="11" Foreground="#8AFFFFFF"/>
+                <TextBlock Text="Claude Code 环境启动器" FontSize="18" FontWeight="Bold"/>
+                <TextBlock Text="安全检查 · 独立配置 · 终端启动" FontSize="11" Foreground="#8AFFFFFF"/>
             </StackPanel>
             <Border x:Name="StatusPill" Margin="60,0,0,0" Padding="12,5" CornerRadius="12" Background="#2E22C55E" VerticalAlignment="Center">
                 <TextBlock x:Name="StatusText" Text="检查中" FontSize="11" FontWeight="Bold" Foreground="#FFFB923C"/>
@@ -40,6 +41,7 @@ $xaml = @"
             <StackPanel>
                 <TextBlock Text="出口IP锁定地区" FontSize="11" Foreground="#80FFFFFF"/>
                 <TextBlock x:Name="RegionText" Text="尚未同步" FontSize="13" FontWeight="Bold" Margin="0,4,0,0"/>
+                <TextBlock x:Name="ProjectText" Text="项目目录：未选择" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
 
@@ -59,16 +61,16 @@ $xaml = @"
 
         <StackPanel Grid.Row="3" Margin="0,14,0,0">
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                <TextBlock Text="当前账号" FontSize="11" Foreground="#80FFFFFF" VerticalAlignment="Center"/>
+                <TextBlock Text="最近启动配置" FontSize="11" Foreground="#80FFFFFF" VerticalAlignment="Center"/>
                 <Border Margin="6,0,0,0" Padding="10,3" CornerRadius="10" Background="#4D6366F1">
                     <TextBlock x:Name="CurrentAccount" Text="?" FontSize="11" FontWeight="Bold" Foreground="#FFA5B4FC"/>
                 </Border>
             </StackPanel>
             <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-                <Button x:Name="BtnA" Grid.Column="0" Content="账号 A" Height="52" FontSize="15" FontWeight="Bold"
+                <Button x:Name="BtnA" Grid.Column="0" Content="Code A · 原有配置" Height="52" FontSize="15" FontWeight="Bold"
                         Foreground="White" Background="#7A6366F1" BorderThickness="0" Cursor="Hand"/>
-                <Button x:Name="BtnB" Grid.Column="2" Content="账号 B" Height="52" FontSize="15" FontWeight="Bold"
+                <Button x:Name="BtnB" Grid.Column="2" Content="Code B · 独立配置" Height="52" FontSize="15" FontWeight="Bold"
                         Foreground="White" Background="#14FFFFFF" BorderBrush="#26FFFFFF" Cursor="Hand"/>
             </Grid>
             <TextBlock x:Name="ActionHint" Text="" FontSize="11" Foreground="#80FFFFFF" Margin="0,8,0,0" TextWrapping="Wrap"/>
@@ -87,6 +89,7 @@ $xaml = @"
                 <Button x:Name="BtnRefresh" Content="重新检查" Padding="18,8" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
                 <Button x:Name="BtnRegion" Content="重新锁定出口" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
                 <Button x:Name="BtnDiagnostic" Content="复制诊断报告" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
+                <Button x:Name="BtnProject" Content="选择项目" Padding="12,8" Margin="8,0,0,0" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
                 <Button x:Name="BtnLogs" Content="打开日志" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
             </WrapPanel>
             <TextBlock Text="必需检查未通过时阻止启动；警告和信息项供参考" FontSize="10" Foreground="#59FFFFFF" HorizontalAlignment="Center" Margin="0,14,0,0"/>
@@ -128,6 +131,7 @@ function Set-ControlsBusy([bool]$busy) {
     $win.FindName('BtnRefresh').IsEnabled = -not $busy
     $win.FindName('BtnFix').IsEnabled = -not $busy
     $win.FindName('BtnRegion').IsEnabled = -not $busy
+    $win.FindName('BtnProject').IsEnabled = -not $busy
 }
 
 function Start-CoreJob([string]$operation, [string]$target = '') {
@@ -148,20 +152,13 @@ function Start-CoreJob([string]$operation, [string]$target = '') {
         $win.FindName('Banner').Text = '正在按出口 IP 同步国家、时区和地区格式…'
     } else {
         Set-Status '切换中' ([System.Windows.Media.Color]::FromRgb(0x60,0xA5,0xFA))
-        $win.FindName('Banner').Text = "正在切换到账号 $target…（归档可能需要一些时间）"
+        $win.FindName('Banner').Text = "正在打开 Claude Code 配置 $target…"
     }
     $script:activeJob = Start-Job -ArgumentList $CORE,$BASE,$operation,$target -ScriptBlock {
         param($corePath,$basePath,$command,$account)
-        $argv = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$corePath,$command)
-        if ($account) { $argv += $account }
-        if ($command -eq 'set-region') { $argv += '--confirm' }
-        if ($command -eq 'checkdetail') {
-            Remove-Item (Join-Path $basePath 'last-check.txt') -Force -ErrorAction SilentlyContinue
-            $null = & powershell.exe @argv 2>&1
-            Get-Content (Join-Path $basePath 'last-check.txt') -Raw -Encoding UTF8
-        } else {
-            (& powershell.exe @argv 2>&1 | Out-String).Trim()
-        }
+        . (Join-Path (Split-Path $corePath -Parent) 'code-functions.ps1')
+        Invoke-CoreUtf8 $corePath $basePath $command $account
+
     }
 }
 
@@ -197,11 +194,12 @@ function Finish-Checks([string]$output) {
         Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
         $win.FindName('Banner').Text = if ($failures.Count) { "未通过：$($failures -join '；')" } else { "检测输出不完整($matched/$($checkNames.Count))，请重新检查" }
     }
-    $currentFile = Join-Path $BASE 'current.txt'
+    $currentFile = if ((Get-LaunchMode) -eq 'code') { Join-Path $BASE 'code-current.txt' } else { Join-Path $BASE 'current.txt' }
     $cur = if (Test-Path $currentFile) { Get-Content $currentFile -Raw } else { '' }
     $st = "current=$($cur.Trim())"
     $win.FindName('CurrentAccount').Text = if ($st -match 'current=B') { 'B' } elseif ($st -match 'current=A') { 'A' } else { '未初始化' }
     Update-RegionDisplay
+    $win.FindName('ProjectText').Text = '项目目录：' + (Get-LaunchSettings).workspace
     Set-ControlsBusy $false
 }
 
@@ -237,7 +235,7 @@ $poller.Add_Tick({
                 Set-ControlsBusy $false
             } else {
                 $win.FindName('CurrentAccount').Text = $target
-                $win.FindName('Banner').Text = "已切换到账号 $target，Claude 启动中。"
+                $win.FindName('Banner').Text = "Claude Code 配置 $target 的终端已打开，请在终端查看登录结果。"
                 Start-CoreJob 'checkdetail'
             }
         } else {
@@ -260,8 +258,9 @@ function Copy-DiagnosticReport {
     Set-ControlsBusy $true
     $script:activeJob = Start-Job -ArgumentList $CORE,$BASE -ScriptBlock {
         param($corePath,$basePath)
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $corePath checkdetail 2>$null | Out-Null
-        $checks = Get-Content (Join-Path $basePath 'last-check.txt') -Raw -Encoding UTF8
+        . (Join-Path (Split-Path $corePath -Parent) 'code-functions.ps1')
+        $checks = Invoke-CoreUtf8 $corePath $basePath 'checkdetail'
+
         $r = Get-Content (Join-Path $basePath 'region.json') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue | ConvertFrom-Json
         $region = $r | Select-Object country,tz_iana,tz_windows,culture,locked_at | ConvertTo-Json
         $meta = try { (& curl.exe -s --max-time 6 'https://ipinfo.io/json' 2>$null | ConvertFrom-Json) } catch { $null }
@@ -282,8 +281,21 @@ $win.FindName('BtnB').Add_Click({ Start-CoreJob 'switch' 'B' })
 $win.FindName('BtnDiagnostic').Add_Click({
     Copy-DiagnosticReport
 })
+$win.FindName('BtnProject').Add_Click({
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = '选择 Claude Code 要工作的项目文件夹'
+    $dialog.SelectedPath = (Get-LaunchSettings).workspace
+    try {
+        if ($dialog.ShowDialog() -eq 'OK') {
+            Set-CodeWorkspace $dialog.SelectedPath
+            $win.FindName('ProjectText').Text = '项目目录：' + $dialog.SelectedPath
+        }
+    } catch { $win.FindName('Banner').Text = $_.Exception.Message }
+    finally { $dialog.Dispose() }
+})
 $win.FindName('BtnLogs').Add_Click({
     Start-Process explorer.exe -ArgumentList "`"$BASE`""
 })
-$win.Add_ContentRendered({ Update-RegionDisplay; Start-CoreJob 'checkdetail' })
+$win.Add_ContentRendered({ Update-RegionDisplay; $win.FindName('ProjectText').Text = '项目目录：' + (Get-LaunchSettings).workspace; Start-CoreJob 'checkdetail' })
 [void]$win.ShowDialog()

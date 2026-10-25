@@ -85,7 +85,8 @@ Windows 用户请使用 `windows/` 下的 PowerShell 版本。关键差异与注
 - **权限模型**：`install.ps1` 需要管理员运行（注册计划任务/锁时区/关 IPv6）；日常使用中「一键修复」通过 `Start-Process -Verb RunAs` 触发 UAC 弹窗。
 - **保镖实现**：用计划任务（AtLogOn 触发）启动隐藏 PowerShell 常驻进程，10 秒巡检，与 Mac 版行为一致。
 - **robocopy 退出码**：0-7 都是成功，8+ 才是失败——判断切换成败时不要按常规退出码判断。
-- **账号数据目录**：`%APPDATA%\Claude`（不是 macOS 的 `~/Library/Application Support/Claude`）。
+- **Windows 默认启动 Claude Code**：A 使用 `%USERPROFILE%\.claude`，B 使用 `%USERPROFILE%\.claude-switcher\code-profiles\B`，通过 `CLAUDE_CONFIG_DIR` 隔离；不要搬移原有 `accounts/` 桌面快照。旧桌面模式仍使用 `%APPDATA%\Claude`。
+- **Code 进程保护**：仅关闭 `code-runs/` 中 PID/开始时间匹配的管理终端及子进程，不按名称批量关闭 Node.js。启动入口为 `code-session.ps1`，共享逻辑在 `code-functions.ps1`；真实账号登录不属于隔离测试。
 - **已知限制**：WPF 界面为第一版重写，未经大规模真机测试；Clash Verge 的 TUN 开关被更新重置后在 Windows 端需手动重开。
 - SmartScreen 首次运行拦截属正常现象（未签名脚本），引导用户「更多信息 → 仍要运行」。
 
