@@ -15,6 +15,71 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem 'windows\*.ps1' | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+            }
+          }
+          if ($failed) { throw 'PowerShell syntax validation failed' }
+
+      - name: Test region mapping
+        shell: pwsh
+        run: |
+          . 'windows\region-functions.ps1'
+          function curl.exe {
+            if ($global:RegionMockMode -eq 'fallback' -and $args -contains 'https://ipinfo.io/json') {
+              $global:LASTEXITCODE = 22
+              return
+            }
+            $global:LASTEXITCODE = 0
+            if ($args -contains 'https://ipinfo.io/json') {
+              if ($global:RegionMockMode -eq 'unknown') {
+                return '{"country":"ZZ","timezone":"Etc/Unknown","ip":"203.0.113.8","org":"Example Network"}'
+              }
+              return '{"country":"JP","timezone":"Asia/Tokyo","ip":"203.0.113.8","org":"Example Network"}'
+            }
+            return "ip=203.0.113.8`nloc=GB"
+          }
+          $global:RegionMockMode = 'ipinfo'
+          $region = Get-RegionInfo
+          if ($region.country -ne 'JP' -or $region.tz_windows -ne 'Tokyo Standard Time' -or $region.culture -ne 'ja-JP') { throw 'ipinfo region mapping failed' }
+          $global:RegionMockMode = 'fallback'
+          $region = Get-RegionInfo
+          if ($region.country -ne 'GB' -or $region.tz_windows -ne 'GMT Standard Time' -or $region.culture -ne 'en-GB') { throw 'Cloudflare fallback mapping failed' }
+          $global:RegionMockMode = 'unknown'
+          $region = Get-RegionInfo
+          if ($region.culture -ne 'en-US' -or $region.tz_windows) { throw 'Unknown region must warn and leave timezone unmapped' }
+          $path = Join-Path $env:RUNNER_TEMP 'region-test.json'
+          Save-RegionInfo $region $path
+          $saved = Get-Content $path -Raw | ConvertFrom-Json
+          if ($saved.country -ne 'ZZ' -or $saved.ip -or -not $saved.updated_at) { throw 'region.json persistence is invalid' }
+          Remove-Item $path -Force
+          $tokens = $null
+          $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'windows\claude-switch.ps1'), [ref]$tokens, [ref]$errors)
+          $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-RulesPinned' }, $true)
+          Invoke-Expression $definition.Extent.Text
+          $global:CLASH_DIR = Join-Path $env:RUNNER_TEMP 'clash-rules-test'
+          $global:PROXY_GROUP = 'GLOBAL'
+          New-Item -ItemType Directory -Force -Path (Join-Path $global:CLASH_DIR 'profiles') | Out-Null
+          $rules = @('DOMAIN-SUFFIX,claude.ai,GLOBAL','DST-PORT,3478,GLOBAL','DST-PORT,5349,GLOBAL','DST-PORT,19302,GLOBAL')
+          $merge = Join-Path $global:CLASH_DIR 'profiles\Merge.yaml'
+          $rules | Set-Content $merge
+          if (-not (Test-RulesPinned)) { throw 'Merge.yaml pinned-rule detection failed' }
+          $rules[0..2] | Set-Content -Path $merge
+          if (Test-RulesPinned) { throw 'Missing STUN rule was incorrectly accepted' }
+          $rules | Set-Content (Join-Path $global:CLASH_DIR 'clash-verge.yaml')
+          if (-not (Test-RulesPinned)) { throw 'clash-verge.yaml pinned-rule detection failed' }
+          Remove-Item $global:CLASH_DIR -Recurse -Force
+
       - name: Install ps2exe
         shell: pwsh
         run: |
@@ -31,7 +96,7 @@ jobs:
           Invoke-ps2exe -inputFile 'windows\SwitcherUI.ps1' -outputFile "$dist\Claude-Switcher.exe" -noConsole -STA -x64 -title 'Claude Switcher' -version '1.0.0.0'
           if (-not (Test-Path "$dist\Claude-Switcher.exe")) { throw 'EXE build failed' }
 
-          foreach ($f in 'install.ps1','install.bat','claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','README.md') {
+          foreach ($f in 'install.ps1','install.bat','uninstall.ps1','uninstall.bat','claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','claude-region-watchdog.ps1','region-functions.ps1','README.md') {
             Copy-Item "windows\$f" $dist -Force
           }
 

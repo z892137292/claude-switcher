@@ -70,6 +70,7 @@ if (-not $region.tz_windows) {
     $region.tz_windows = (Get-TimeZone).Id
     Write-Host "[WARN] 未识别到时区映射($($region.tz_iana)),保留当前时区 $($region.tz_windows)" -ForegroundColor Yellow
 }
+New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 Save-RegionInfo $region "$BASE\region.json"
 Write-Host "[OK] 地区目标: $($region.country) / $($region.tz_iana) / $($region.culture)" -ForegroundColor Green
 
@@ -153,7 +154,7 @@ prepend-rules:
 # ---- 7. 系统级配置 ----
 Apply-RegionUserSettings $region | Out-Null
 $regionResults = Apply-RegionSystemSettings $region
-Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled } | Disable-NetAdapterBinding -Confirm:$false
+Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled } | Disable-NetAdapterBinding -Confirm:$false
 Clear-DnsClientCache
 Write-Host "[OK] 地区设置: $($regionResults -join '; ') / IPv6 已关闭 / DNS 缓存已刷新" -ForegroundColor Green
 
@@ -169,7 +170,7 @@ Write-Host "[OK] 保镖已注册并启动(计划任务,登录自动运行)" -For
 $regionAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-region-watchdog.ps1`""
 $loginTrigger = New-ScheduledTaskTrigger -AtLogOn
 $timerTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::FromDays(3650))
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
 Register-ScheduledTask -TaskName 'ClaudeRegionWatchdog' -Action $regionAction -Trigger @($loginTrigger,$timerTrigger) -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName 'ClaudeRegionWatchdog'
 Write-Host "[OK] 地区看门狗已注册(登录启动 + 每5分钟,最高权限)" -ForegroundColor Green

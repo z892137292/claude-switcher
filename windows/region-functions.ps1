@@ -1,5 +1,5 @@
 ﻿$script:RegionCultureMap = @{
-    US='en-US'; GB='en-GB'; JP='ja-JP'; KR='ko-KR'; TW='zh-TW'; HK='zh-HK'; SG='en-SG'
+    US='en-US'; GB='en-GB'; JP='ja-JP'; KR='ko-KR'; TW='zh-TW'; HK='zh-HK'; SG='en-SG'; CN='zh-CN'
     DE='de-DE'; FR='fr-FR'; CA='en-CA'; AU='en-AU'; NZ='en-NZ'; IE='en-IE'; NL='nl-NL'
     CH='de-CH'; AT='de-AT'; BE='nl-BE'; ES='es-ES'; IT='it-IT'; PT='pt-PT'; SE='sv-SE'
     NO='nb-NO'; DK='da-DK'; FI='fi-FI'; PL='pl-PL'; CZ='cs-CZ'; HU='hu-HU'; RO='ro-RO'
@@ -59,11 +59,12 @@ $script:CountryDefaultTimeZone = @{
     BR='America/Sao_Paulo'; MX='America/Mexico_City'; IN='Asia/Kolkata'; TH='Asia/Bangkok'
     MY='Asia/Kuala_Lumpur'; ID='Asia/Jakarta'; PH='Asia/Manila'; VN='Asia/Ho_Chi_Minh'
     AE='Asia/Dubai'; ZA='Africa/Johannesburg'; IL='Asia/Jerusalem'; RU='Europe/Moscow'
+    CN='Asia/Shanghai'
 }
 
 $script:CountryGeoId = @{
     US=244; GB=242; JP=122; KR=134; TW=237; HK=104; SG=215; DE=94; FR=84; CA=39; AU=12
-    NZ=163; IE=68; NL=151; CH=223; AT=14; BE=21; ES=217; IT=118; PT=193; SE=221; NO=177
+    NZ=163; IE=68; NL=151; CH=223; AT=14; BE=21; ES=217; IT=118; PT=193; SE=221; NO=177; CN=45
     DK=61; FI=77; PL=191; CZ=75; HU=109; RO=200; GR=98; TR=235; IL=117; IN=113; TH=227
     MY=137; ID=105; PH=189; VN=251; BR=32; MX=148; AR=11; CL=46; ZA=209; AE=2; RU=203; UA=241
 }
@@ -83,6 +84,12 @@ function Get-RegionInfo {
             $trace = & curl.exe -s --max-time 8 'https://www.cloudflare.com/cdn-cgi/trace' 2>$null
             $country = (($trace -split "`n" | Where-Object { $_ -match '^loc=' } | Select-Object -First 1) -replace '^loc=','').Trim()
             $ip = (($trace -split "`n" | Where-Object { $_ -match '^ip=' } | Select-Object -First 1) -replace '^ip=','').Trim()
+        } catch {}
+    }
+    if (-not $iana) {
+        try {
+            $timezone = & curl.exe -s --max-time 5 'https://ipinfo.io/timezone' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $timezone -match '^[A-Za-z_]+/[A-Za-z0-9_+/-]+$') { $iana = $timezone.Trim() }
         } catch {}
     }
     if (-not $iana -and $country) { $iana = $script:CountryDefaultTimeZone[$country] }

@@ -14,6 +14,10 @@ $detected = Get-RegionInfo
 if (-not $detected.country) { Write-RegionLog '出口国家探测失败，保留现有地区配置'; exit 0 }
 if ($detected.country -eq 'CN' -and $env:FORCE -ne '1') { Write-RegionLog '出口国家为 CN，拒绝自动同步'; exit 0 }
 $current = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+if (-not $detected.tz_windows) {
+    $detected.tz_windows = if ($current.tz_windows) { $current.tz_windows } else { (Get-TimeZone).Id }
+    Write-RegionLog "无法映射 $($detected.tz_iana)，保持现有时区 $($detected.tz_windows)"
+}
 
 if (-not $current -or $current.country -ne $detected.country) {
     $pending = if (Test-Path $PENDING_FILE) { try { Get-Content $PENDING_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
@@ -31,6 +35,7 @@ if (-not $current -or $current.country -ne $detected.country) {
     exit 0
 }
 
+Remove-Item $PENDING_FILE -Force -ErrorAction SilentlyContinue
 if ($detected.tz_windows -and $current.tz_windows -ne $detected.tz_windows) {
     Save-RegionInfo $detected $REGION_FILE
     Apply-RegionUserSettings $detected | Out-Null

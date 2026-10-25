@@ -125,12 +125,12 @@ function Test-WebRTC($exitIp) {
 }
 
 function Test-RulesPinned {
-    $paths = @("$CLASH_DIR\profiles\Merge.yaml", "$CLASH_DIR\clash-verge.yaml") | Where-Object { Test-Path $_ }
+    $paths = @((Join-Path (Join-Path $CLASH_DIR 'profiles') 'Merge.yaml'), (Join-Path $CLASH_DIR 'clash-verge.yaml')) | Where-Object { Test-Path $_ }
     foreach ($path in $paths) {
-        $domain = (Test-Path $path) -and (Select-String -Path $path -Pattern "DOMAIN-SUFFIX,claude.ai,$([regex]::Escape($PROXY_GROUP))" -Quiet)
+        $domain = (Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet)
         $ports = $true
         foreach ($port in @(3478,5349,19302)) {
-            if (-not ((Test-Path $path) -and (Select-String -Path $path -Pattern "DST-PORT,$port," -Quiet))) { $ports = $false; break }
+            if (-not ((Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DST-PORT,$port," -Quiet))) { $ports = $false; break }
         }
         if ($domain -and $ports) { return $true }
     }
@@ -153,9 +153,11 @@ function Invoke-SetRegion {
         Apply-RegionSystemSettings $region | ForEach-Object { "REGION:$_" }
     } else {
         $adminScript = Join-Path $BASE 'apply-region-admin.ps1'
+        $helperPath = (Join-Path $PSScriptRoot 'region-functions.ps1').Replace("'", "''")
+        $regionPath = $REGION_FILE.Replace("'", "''")
         $adminBody = @"
-. '$PSScriptRoot\region-functions.ps1'
-`$r = Get-Content '$REGION_FILE' -Raw | ConvertFrom-Json
+. '$helperPath'
+`$r = Get-Content '$regionPath' -Raw | ConvertFrom-Json
 Apply-RegionSystemSettings `$r
 "@
         $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
@@ -202,7 +204,7 @@ function Invoke-CheckDetail {
     $targetCulture = if ($region.culture) { $region.culture } else { $CULTURE_TARGET }
     if ($cult -eq $targetCulture) { "地区=ok:$cult" } else { "地区=fail:$cult(期望$targetCulture)" }
 
-    $v6off = [bool](Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
+    $v6off = [bool](Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
     if (-not $v6off) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭" }
 
     $dns = (Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
@@ -260,7 +262,7 @@ function Invoke-Fix {
         catch { "FIX:地区格式($targetCulture) ✗：$($_.Exception.Message)" }
     }
     $adminScript += ". '$PSScriptRoot\region-functions.ps1'; `$region = Get-Content '$REGION_FILE' -Raw | ConvertFrom-Json; Apply-RegionSystemSettings `$region | Out-Null"
-    if (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
+    if (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapter -Physical | Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
     $adminScript += "Clear-DnsClientCache"
     if (-not (Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue)) {
         $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Force | Out-Null; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
@@ -366,6 +368,13 @@ function Start-ClaudeApp {
 
 function Invoke-Switch($target) {
     if ($target -notin @('A','B')) { "FAIL:目标账号必须是 A 或 B"; return }
+    $targetArchive = "$BASE\accounts\$target"
+    if ((Test-Path "$targetArchive.new") -or ((Test-Path "$targetArchive.previous") -and -not (Test-Path $targetArchive))) {
+        "FAIL:账号$target 存在待恢复快照(.new/.previous)，请先确认并手动处理"; return
+    }
+    if ((Test-Path "$DATA.new") -or (Test-Path "$DATA.previous")) {
+        "FAIL:发现残留 Claude 数据目录(.new/.previous)，请先确认并手动处理"; return
+    }
     $checkLines = @(Invoke-CheckDetail)
     $failedChecks = @($checkLines | Where-Object { $_ -match '^[^=]+=fail:' })
     if ($failedChecks.Count -gt 0) {
@@ -373,29 +382,30 @@ function Invoke-Switch($target) {
         return
     }
     $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
+    $enrolledNow = $false
 
     # 首次运行:收编当前登录为账号A
     if ($cur -eq 'none' -and (Test-Path $DATA) -and (Get-ChildItem $DATA -ErrorAction SilentlyContinue)) {
         if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
         try { Save-Account A } catch { "FAIL:$($_.Exception.Message)"; return }
         $cur = 'A'; 'A' | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
+        $enrolledNow = $true
         Log "首次运行:当前登录状态已收编为账号A"
         "NOTE:已将当前登录收编为账号A"
     }
 
-    if ($cur -eq $target) { Start-ClaudeApp; "INFO:当前已是账号$target"; return }
+    if ($cur -eq $target) {
+        if ($enrolledNow) { Remove-Item "$BASE\accounts\$target.previous" -Recurse -Force -ErrorAction SilentlyContinue }
+        Start-ClaudeApp; "INFO:当前已是账号$target"; return
+    }
 
     if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
 
-    if ($cur -ne 'none' -and (Test-Path $DATA)) {
+    if ($cur -ne 'none' -and (Test-Path $DATA) -and -not $enrolledNow) {
         try { Save-Account $cur } catch { "FAIL:$($_.Exception.Message)"; return }
     }
 
     if (Test-Path "$BASE\accounts\$target") {
-        $targetArchive = "$BASE\accounts\$target"
-        if ((Test-Path "$targetArchive.new") -or (Test-Path "$targetArchive.previous")) {
-            "FAIL:账号$target 存在待恢复快照(.new/.previous)，请先确认并手动处理"; return
-        }
         $dataStage = "$DATA.new"
         if (Test-Path $dataStage) { "FAIL:发现残留数据目录 $dataStage，请确认后手动处理"; return }
         robocopy "$targetArchive" "$dataStage" /E /NFL /NDL /NJH /NJS | Out-Null
@@ -406,19 +416,27 @@ function Invoke-Switch($target) {
         }
         $dataPrevious = "$DATA.previous"
         if (Test-Path $dataPrevious) { "FAIL:发现残留数据目录 $dataPrevious，请确认后手动处理"; return }
-        if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
-        try { Move-Item -LiteralPath $dataStage -Destination $DATA -ErrorAction Stop }
+        try {
+            if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
+            Move-Item -LiteralPath $dataStage -Destination $DATA -ErrorAction Stop
+        }
         catch {
             if ((Test-Path $dataPrevious) -and -not (Test-Path $DATA)) { Move-Item -LiteralPath $dataPrevious -Destination $DATA -ErrorAction SilentlyContinue }
             "FAIL:账号$target 原子替换失败: $($_.Exception.Message)"; return
         }
         Remove-Item $dataPrevious -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$targetArchive.previous" -Recurse -Force -ErrorAction SilentlyContinue
         Log "已载入账号$target 存档"
     } else {
         $dataPrevious = "$DATA.previous"
         if (Test-Path $dataPrevious) { "FAIL:发现残留数据目录 $dataPrevious，请确认后手动处理"; return }
-        if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
-        New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+        try {
+            if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
+            New-Item -ItemType Directory -Force -Path $DATA -ErrorAction Stop | Out-Null
+        } catch {
+            if ((Test-Path $dataPrevious) -and -not (Test-Path $DATA)) { Move-Item -LiteralPath $dataPrevious -Destination $DATA -ErrorAction SilentlyContinue }
+            "FAIL:无法初始化账号$target 数据目录: $($_.Exception.Message)"; return
+        }
         Remove-Item $dataPrevious -Recurse -Force -ErrorAction SilentlyContinue
         Log "账号$target 无存档，将以全新状态初始化"
     }
