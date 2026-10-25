@@ -74,9 +74,14 @@ function Test-TunUp {
 }
 
 function Get-Egress {
-    $trace = & curl.exe -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null
-    $ip  = (($trace -split "`n" | Where-Object { $_ -like 'ip=*' })  -replace 'ip=','').Trim()
-    $loc = (($trace -split "`n" | Where-Object { $_ -like 'loc=*' }) -replace 'loc=','').Trim()
+    $ip = ''; $loc = ''
+    try {
+        $trace = & curl.exe -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $trace) {
+            $ip  = (($trace -split "`n" | Where-Object { $_ -like 'ip=*' } | Select-Object -First 1) -replace '^ip=','').Trim()
+            $loc = ((($trace -split "`n" | Where-Object { $_ -like 'loc=*' } | Select-Object -First 1) -replace '^loc=','').Trim()).ToUpperInvariant()
+        }
+    } catch {}
     return @{ ip = $ip; loc = $loc }
 }
 
@@ -120,7 +125,7 @@ function Test-WebRTC($exitIp) {
     }
     if ($found.Count -eq 0) { return @{ code = 'ok'; detail = 'UDP不出网,零暴露' } }
     $leak = $found | Where-Object { $_ -ne $exitIp }
-    if ($leak) { return @{ code = 'fail'; detail = "暴露非代理IP: $($leak -join ',')" } }
+    if ($leak) { return @{ code = 'fail'; detail = "暴露非代理IP: $(($leak | ForEach-Object { Protect-ExitIp $_ }) -join ',')" } }
     return @{ code = 'ok'; detail = '仅暴露代理IP' }
 }
 
@@ -137,14 +142,23 @@ function Test-RulesPinned {
     return $false
 }
 
-function Invoke-SetRegion {
+function Invoke-SetRegion([switch]$Confirm) {
     $region = Get-RegionInfo
-    if (-not $region.country) { "FAIL:无法获取出口国家，请检查网络后重试"; return }
+    if (-not $region.country -or -not $region.ip) { "FAIL:无法获取出口IP或国家，请检查网络后重试"; return }
     if ($region.country -eq 'CN' -and $env:FORCE -ne '1') { "FAIL:出口国家为 CN，请先开启代理；如确需跳过，请设置 FORCE=1"; return }
     if (-not $region.tz_windows) {
         $region.tz_windows = (Get-TimeZone).Id
         "WARN:无法识别出口时区 $($region.tz_iana)，保留当前时区 $($region.tz_windows)"
     }
+    if ([Console]::IsInputRedirected) {
+        if (-not $Confirm) { "FAIL:非交互场景重新锁定环境必须显式指定 -Confirm"; return }
+    } else {
+        Write-Host "更换出口环境有封号风险。仅在更换 VPS 后重新锁定。"
+        if ((Read-Host '确认重新锁定当前环境？请输入 YES') -cne 'YES') { "FAIL:已取消重新锁定环境"; return }
+    }
+    $oldRegion = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+    $region.exit_ip = $region.ip
+    $region.locked_at = (Get-Date).ToString('o')
     New-Item -ItemType Directory -Force -Path $BASE | Out-Null
     Save-RegionInfo $region $REGION_FILE
     Apply-RegionUserSettings $region | Out-Null
@@ -167,6 +181,11 @@ Apply-RegionSystemSettings `$r
             "REGION:已请求管理员权限应用系统时区/区域设置"
         } catch { "WARN:管理员授权被取消，系统时区和系统区域设置未应用" }
     }
+    $oldCountry = if ($oldRegion.country) { $oldRegion.country } else { '无' }
+    $oldIp = if ($oldRegion.exit_ip) { Protect-ExitIp $oldRegion.exit_ip } else { '无' }
+    $newIp = Protect-ExitIp $region.exit_ip
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') country=$oldCountry -> $($region.country); exit_ip=$oldIp -> $newIp" |
+        Out-File -Append -Encoding utf8 (Join-Path $BASE 'region-change.log')
     "OK:已同步 $($region.country) / $($region.tz_iana) / $($region.culture)"
 }
 
@@ -185,23 +204,27 @@ function Invoke-CheckDetail {
 
     $e = Get-Egress
     $region = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
-    $targetCountry = if ($region.country) { $region.country } else { $COUNTRY_TARGET }
-    if ($e.loc -eq $targetCountry) { "出口IP=ok:$($e.ip)" } else { "出口IP=fail:$($e.ip)/$($e.loc)(期望$targetCountry)" }
+    $targetCountry = if ($region.country) { ([string]$region.country).ToUpperInvariant() } else { '' }
+    if (-not $region -or -not $e.ip -or -not $e.loc) { "出口IP=fail:无法获取出口IP/国家或缺少锁定基准" }
+    elseif ($e.loc -eq $targetCountry) { "出口IP=ok:国家 $($e.loc)" }
+    else { "出口IP=fail:当前国家 $($e.loc)，期望 $targetCountry" }
 
-    $lastipFile = "$BASE\lastip.txt"
-    $lastip = if (Test-Path $lastipFile) { (Get-Content $lastipFile -Raw).Trim() } else { '' }
-    if (-not $e.ip) { "IP一致=fail:未获取到出口IP" }
-    elseif (-not $lastip) { "IP一致=ok:首次记录" }
-    elseif ($e.ip -eq $lastip) { "IP一致=ok" }
-    else { "IP一致=warn:$lastip → $($e.ip)" }
-    if ($e.ip) { $e.ip | Out-File -Encoding ascii -NoNewline $lastipFile }
+    $egressMatch = Test-RegionEgressMatch $e.ip $e.loc $region
+    if ($egressMatch.passed) { "IP一致=ok:出口IP与锁定基准完全一致" }
+    else { "IP一致=fail:$($egressMatch.reason)" }
 
     $tz = (Get-TimeZone).Id
     $targetTz = if ($region.tz_windows) { $region.tz_windows } else { $TZ_TARGET }
+    if ($targetTz -and $tz -ne $targetTz) {
+        try { Set-TimeZone -Id $targetTz -ErrorAction Stop; $tz = (Get-TimeZone).Id } catch {}
+    }
     if ($tz -eq $targetTz) { "时区=ok:$tz" } else { "时区=fail:$tz(期望$targetTz)" }
 
     $cult = (Get-Culture).Name
     $targetCulture = if ($region.culture) { $region.culture } else { $CULTURE_TARGET }
+    if ($targetCulture -and $cult -ne $targetCulture) {
+        try { Set-Culture -CultureInfo $targetCulture -ErrorAction Stop; $cult = (Get-Culture).Name } catch {}
+    }
     if ($cult -eq $targetCulture) { "地区=ok:$cult" } else { "地区=fail:$cult(期望$targetCulture)" }
 
     $v6off = [bool](Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
@@ -221,11 +244,8 @@ function Invoke-CheckDetail {
     # 客户端语言: Windows 端 Claude 跟随系统区域格式,地区检查已覆盖
     "客户端语言=ok:跟随系统"
 
-    $org = ''
-    try { $org = ((& curl.exe -s --max-time 6 "https://ipinfo.io/json" 2>$null) | ConvertFrom-Json).org } catch {}
-    if (-not $org) { "ASN属性=warn:未获取" }
-    elseif ($org -match 'Comcast|AT&T|Verizon|Spectrum|Charter|Cox|T-Mobile|Cable|esidential') { "ASN属性=ok:$org" }
-    else { "ASN属性=warn:疑似机房($org)" }
+    $asn = if ($region.asn) { [string]$region.asn } else { '未记录' }
+    "ASN属性=info:$asn (仅记录，不阻断)"
 
     $r1 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://claude.ai/" 2>$null
     $r2 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://api.anthropic.com/v1/models" 2>$null
