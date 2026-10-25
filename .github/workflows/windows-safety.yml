@@ -17,5 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Isolated Windows safety tests
-        shell: ${{ matrix.shell }}
-        run: ./tests/windows-safety.ps1
+        shell: pwsh
+        run: |
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -File ./tests/windows-safety.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
