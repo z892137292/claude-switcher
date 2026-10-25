@@ -118,7 +118,11 @@ function Test-WebRTC($exitIp) {
     return @{ code = 'ok'; detail = '仅暴露代理IP' }
 }
 
-function Test-RulesPinned { Test-Path "$CLASH_DIR\clash-verge.yaml" -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet) -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DST-PORT,3478," -Quiet) }
+function Test-RulesPinned {
+    $yaml = "$CLASH_DIR\clash-verge.yaml"
+    if (-not (Test-Path $yaml)) { return $false }
+    return ([bool](Select-String -Path $yaml -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -SimpleMatch -Quiet) -and [bool](Select-String -Path $yaml -Pattern "DST-PORT,3478," -SimpleMatch -Quiet))
+}
 
 function Invoke-CheckDetail {
     $pname = Get-ProxyName

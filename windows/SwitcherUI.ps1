@@ -100,7 +100,9 @@ function Set-Status($text, $color) {
 function Invoke-Core([string[]]$coreArgs) {
     # checkdetail 改从落盘的 last-check.txt(UTF-8)读取:子进程 stdout 经控制台代码页(如 GBK/936)转码会把中文键名弄乱,导致 14 项只匹配 3 项
     if ($coreArgs[0] -eq 'checkdetail') {
+        Remove-Item "$BASE\last-check.txt" -ErrorAction SilentlyContinue
         & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @coreArgs 2>$null | Out-Null
+        if (-not (Test-Path "$BASE\last-check.txt")) { return '' }
         return ((Get-Content "$BASE\last-check.txt" -Encoding UTF8) -join "`n").Trim()
     }
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $CORE @coreArgs 2>$null
