@@ -2,6 +2,7 @@
 # 右键 -> 使用 PowerShell 以管理员身份运行(或在管理员 PowerShell 里执行)
 $ErrorActionPreference = 'Stop'
 $BASE = "$env:USERPROFILE\.claude-switcher"
+. "$PSScriptRoot\region-functions.ps1"
 $CLASH_DIR = @(
     "$env:APPDATA\io.github.clash-verge-rev.clash-verge-rev",
     "$env:LOCALAPPDATA\io.github.clash-verge-rev.clash-verge-rev"
@@ -51,25 +52,27 @@ if (-not $PROXY_MODE) {
 Write-Host "[OK] 代理客户端: $PROXY_MODE" -ForegroundColor Green
 Write-Host "[OK] 前置检查通过" -ForegroundColor Green
 
-# ---- 1. 出口国家检查(不能是 CN,否则时区会锁错) ----
-$info = try { (& curl.exe -s --max-time 8 "https://ipinfo.io/json" 2>$null | ConvertFrom-Json) } catch { $null }
-$country = if ($info) { $info.country } else { '' }
-$ip = if ($info) { $info.ip } else { '未知' }
+# ---- 1. 按出口IP识别地区 ----
+$region = Get-RegionInfo
+$country = $region.country
+$ip = $region.ip
 $FORCE = $env:FORCE
-if ($country -eq 'CN' -and -not $FORCE) {
+if ($country -eq 'CN' -and $FORCE -ne '1') {
     Write-Host "X 当前出口在国内(CN),请先开启代理(TUN模式)并确认节点可用再运行" -ForegroundColor Red
     pause; exit 1
 }
 if (-not $country) {
-    if ($FORCE) {
-        $country = 'US'
-        Write-Host "[WARN] 未能识别出口国家,FORCE 已跳过检查,按 US 写入" -ForegroundColor Yellow
-    } else {
-        Write-Host "X 未能识别出口国家,请确认代理已开启后重试(或用 FORCE=1 跳过)" -ForegroundColor Red
-        pause; exit 1
-    }
+    Write-Host "X 未能识别出口国家,请确认代理已开启后重试" -ForegroundColor Red
+    pause; exit 1
 }
 Write-Host "[OK] 出口: $ip ($country)" -ForegroundColor Green
+if (-not $region.tz_windows) {
+    $region.tz_windows = (Get-TimeZone).Id
+    Write-Host "[WARN] 未识别到时区映射($($region.tz_iana)),保留当前时区 $($region.tz_windows)" -ForegroundColor Yellow
+}
+New-Item -ItemType Directory -Force -Path $BASE | Out-Null
+Save-RegionInfo $region "$BASE\region.json"
+Write-Host "[OK] 地区目标: $($region.country) / $($region.tz_iana) / $($region.culture)" -ForegroundColor Green
 
 # ---- 2. 自动识别代理组名(仅 Clash Verge) ----
 $grp = 'GLOBAL'
@@ -87,45 +90,19 @@ if ($PROXY_MODE -eq 'clash-verge' -and $CLASH_DIR) {
     Write-Host "[OK] 代理组: $grp" -ForegroundColor Green
 }
 
-# ---- 3. IANA 时区 -> Windows 时区ID ----
-$tzMap = @{
-    'America/New_York'    = 'Eastern Standard Time'
-    'America/Chicago'     = 'Central Standard Time'
-    'America/Denver'      = 'Mountain Standard Time'
-    'America/Los_Angeles' = 'Pacific Standard Time'
-    'America/Toronto'     = 'Eastern Standard Time'
-    'America/Vancouver'   = 'Pacific Standard Time'
-    'Asia/Singapore'      = 'Singapore Standard Time'
-    'Asia/Tokyo'          = 'Tokyo Standard Time'
-    'Asia/Seoul'          = 'Korea Standard Time'
-    'Asia/Taipei'         = 'Taipei Standard Time'
-    'Asia/Hong_Kong'      = 'China Standard Time'
-    'Europe/London'       = 'GMT Standard Time'
-    'Europe/Berlin'       = 'W. Europe Standard Time'
-    'Europe/Paris'        = 'Romance Standard Time'
-    'Australia/Sydney'    = 'AUS Eastern Standard Time'
-    'Australia/Melbourne' = 'AUS Eastern Standard Time'
-}
-$tzIana = if ($info -and $info.timezone) { $info.timezone } else { '' }
-$tzId = $tzMap[$tzIana]
-if (-not $tzId) { $tzId = 'Eastern Standard Time' }
-Write-Host "[OK] 锁定时区: $tzId (按出口IP识别)" -ForegroundColor Green
-
 # ---- 4. 安装文件 ----
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 Copy-Item "$PSScriptRoot\claude-switch.ps1"   "$BASE\claude-switch.ps1" -Force
 Copy-Item "$PSScriptRoot\SwitcherUI.ps1"      "$BASE\SwitcherUI.ps1" -Force
 Copy-Item "$PSScriptRoot\claude-bodyguard.ps1" "$BASE\claude-bodyguard.ps1" -Force
+Copy-Item "$PSScriptRoot\claude-region-watchdog.ps1" "$BASE\claude-region-watchdog.ps1" -Force
+Copy-Item "$PSScriptRoot\region-functions.ps1" "$BASE\region-functions.ps1" -Force
 
-# 写入探测到的客户端模式/代理组名/国家/时区(替换串里的 $ 用 $$ 转义,避免被当作捕获组)
+# 仅写入代理模式和代理组；国家/时区/地区格式保存在 region.json
 $core = Get-Content "$BASE\claude-switch.ps1" -Raw
 $modeEsc = $PROXY_MODE.Replace('$', '$$')
-$countryEsc = $country.Replace('$', '$$')
-$tzEsc = $tzId.Replace('$', '$$')
 $grpEsc = $grp.Replace('$', '$$')
 $core = $core -replace '\$PROXY_MODE = "[^"]*"', ('$$PROXY_MODE = "' + $modeEsc + '"')
-$core = $core -replace '\$COUNTRY_TARGET = "[^"]*"', ('$$COUNTRY_TARGET = "' + $countryEsc + '"')
-$core = $core -replace '\$TZ_TARGET = "[^"]*"', ('$$TZ_TARGET = "' + $tzEsc + '"')
 $core = $core -replace '\$PROXY_GROUP = "[^"]*"', ('$$PROXY_GROUP = "' + $grpEsc + '"')
 # 强制写回 UTF-8 BOM:计划任务用 powershell.exe 5.1 读取,无 BOM 会把中文读成乱码
 $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
@@ -175,10 +152,11 @@ prepend-rules:
 }
 
 # ---- 7. 系统级配置 ----
-Set-TimeZone -Id $tzId
-Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled } | Disable-NetAdapterBinding -Confirm:$false
+Apply-RegionUserSettings $region | Out-Null
+$regionResults = Apply-RegionSystemSettings $region
+Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled } | Disable-NetAdapterBinding -Confirm:$false
 Clear-DnsClientCache
-Write-Host "[OK] 时区已锁定 / IPv6 已关闭 / DNS 缓存已刷新" -ForegroundColor Green
+Write-Host "[OK] 地区设置: $($regionResults -join '; ') / IPv6 已关闭 / DNS 缓存已刷新" -ForegroundColor Green
 
 # ---- 8. 注册保镖计划任务 ----
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`""
@@ -187,6 +165,15 @@ Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action $action -Trigger $tri
 Stop-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName 'ClaudeBodyguard'
 Write-Host "[OK] 保镖已注册并启动(计划任务,登录自动运行)" -ForegroundColor Green
+
+# ---- 8.1 地区看门狗(登录 + 每5分钟,最高权限) ----
+$regionAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-region-watchdog.ps1`""
+$loginTrigger = New-ScheduledTaskTrigger -AtLogOn
+$timerTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::FromDays(3650))
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskName 'ClaudeRegionWatchdog' -Action $regionAction -Trigger @($loginTrigger,$timerTrigger) -Principal $principal -Force | Out-Null
+Start-ScheduledTask -TaskName 'ClaudeRegionWatchdog'
+Write-Host "[OK] 地区看门狗已注册(登录启动 + 每5分钟,最高权限)" -ForegroundColor Green
 
 # ---- 9. 重启 Clash 使规则生效(仅 Clash Verge) ----
 if ($PROXY_MODE -eq 'clash-verge') {
@@ -201,4 +188,10 @@ Write-Host "==================================" -ForegroundColor Green
 Write-Host "  安装完成! 双击桌面「Claude切换器」使用" -ForegroundColor Green
 Write-Host "  首次使用: 打开后选账号A(自动收编当前登录)" -ForegroundColor Green
 Write-Host "==================================" -ForegroundColor Green
+$checkOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$BASE\claude-switch.ps1" checkdetail 2>&1
+Write-Host "`n安装后安全检查：" -ForegroundColor Cyan
+$checkOutput | ForEach-Object {
+    $color = if ($_ -match '=ok:') { 'Green' } elseif ($_ -match '=warn:') { 'Yellow' } elseif ($_ -match '=fail:') { 'Red' } else { 'Gray' }
+    Write-Host $_ -ForegroundColor $color
+}
 pause

@@ -13,12 +13,18 @@ $PROXY_GROUP = "GLOBAL"                # Clash 代理组名
 $BASE = Join-Path $env:USERPROFILE ".claude-switcher"
 $DATA = Join-Path $env:APPDATA "Claude"
 $LOG  = Join-Path $BASE "claude-switch.log"
+$REGION_FILE = Join-Path $BASE "region.json"
+. (Join-Path $PSScriptRoot "region-functions.ps1")
 $CLASH_DIR = @(
     (Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev"),
     (Join-Path $env:LOCALAPPDATA "io.github.clash-verge-rev.clash-verge-rev")
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $CLASH_DIR) { $CLASH_DIR = Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev" }
 New-Item -ItemType Directory -Force -Path "$BASE\accounts" | Out-Null
+$regionConfig = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+$COUNTRY_TARGET = if ($regionConfig.country) { [string]$regionConfig.country } else { $COUNTRY_TARGET }
+$TZ_TARGET = if ($regionConfig.tz_windows) { [string]$regionConfig.tz_windows } else { $TZ_TARGET }
+$CULTURE_TARGET = if ($regionConfig.culture) { [string]$regionConfig.culture } else { 'en-US' }
 
 function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Out-File -Append -Encoding utf8 $LOG }
 
@@ -118,7 +124,51 @@ function Test-WebRTC($exitIp) {
     return @{ code = 'ok'; detail = '仅暴露代理IP' }
 }
 
-function Test-RulesPinned { Test-Path "$CLASH_DIR\clash-verge.yaml" -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet) -and (Select-String -Path "$CLASH_DIR\clash-verge.yaml" -Pattern "DST-PORT,3478," -Quiet) }
+function Test-RulesPinned {
+    $paths = @((Join-Path (Join-Path $CLASH_DIR 'profiles') 'Merge.yaml'), (Join-Path $CLASH_DIR 'clash-verge.yaml')) | Where-Object { Test-Path $_ }
+    foreach ($path in $paths) {
+        $domain = (Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet)
+        $ports = $true
+        foreach ($port in @(3478,5349,19302)) {
+            if (-not ((Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DST-PORT,$port," -Quiet))) { $ports = $false; break }
+        }
+        if ($domain -and $ports) { return $true }
+    }
+    return $false
+}
+
+function Invoke-SetRegion {
+    $region = Get-RegionInfo
+    if (-not $region.country) { "FAIL:无法获取出口国家，请检查网络后重试"; return }
+    if ($region.country -eq 'CN' -and $env:FORCE -ne '1') { "FAIL:出口国家为 CN，请先开启代理；如确需跳过，请设置 FORCE=1"; return }
+    if (-not $region.tz_windows) {
+        $region.tz_windows = (Get-TimeZone).Id
+        "WARN:无法识别出口时区 $($region.tz_iana)，保留当前时区 $($region.tz_windows)"
+    }
+    New-Item -ItemType Directory -Force -Path $BASE | Out-Null
+    Save-RegionInfo $region $REGION_FILE
+    Apply-RegionUserSettings $region | Out-Null
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Apply-RegionSystemSettings $region | ForEach-Object { "REGION:$_" }
+    } else {
+        $adminScript = Join-Path $BASE 'apply-region-admin.ps1'
+        $helperPath = (Join-Path $PSScriptRoot 'region-functions.ps1').Replace("'", "''")
+        $regionPath = $REGION_FILE.Replace("'", "''")
+        $adminBody = @"
+. '$helperPath'
+`$r = Get-Content '$regionPath' -Raw | ConvertFrom-Json
+Apply-RegionSystemSettings `$r
+"@
+        $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
+        [System.IO.File]::WriteAllText($adminScript, $adminBody, $utf8Bom)
+        try {
+            Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$adminScript`""
+            "REGION:已请求管理员权限应用系统时区/区域设置"
+        } catch { "WARN:管理员授权被取消，系统时区和系统区域设置未应用" }
+    }
+    "OK:已同步 $($region.country) / $($region.tz_iana) / $($region.culture)"
+}
 
 function Invoke-CheckDetail {
     $pname = Get-ProxyName
@@ -134,7 +184,9 @@ function Invoke-CheckDetail {
     } else { "TUN网卡=fail:不在线" }
 
     $e = Get-Egress
-    if ($e.loc -eq $COUNTRY_TARGET) { "出口IP=ok:$($e.ip)" } else { "出口IP=fail:$($e.ip)/$($e.loc)(期望$COUNTRY_TARGET)" }
+    $region = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
+    $targetCountry = if ($region.country) { $region.country } else { $COUNTRY_TARGET }
+    if ($e.loc -eq $targetCountry) { "出口IP=ok:$($e.ip)" } else { "出口IP=fail:$($e.ip)/$($e.loc)(期望$targetCountry)" }
 
     $lastipFile = "$BASE\lastip.txt"
     $lastip = if (Test-Path $lastipFile) { (Get-Content $lastipFile -Raw).Trim() } else { '' }
@@ -145,12 +197,14 @@ function Invoke-CheckDetail {
     if ($e.ip) { $e.ip | Out-File -Encoding ascii -NoNewline $lastipFile }
 
     $tz = (Get-TimeZone).Id
-    if ($tz -eq $TZ_TARGET) { "时区=ok" } else { "时区=fail:$tz" }
+    $targetTz = if ($region.tz_windows) { $region.tz_windows } else { $TZ_TARGET }
+    if ($tz -eq $targetTz) { "时区=ok:$tz" } else { "时区=fail:$tz(期望$targetTz)" }
 
     $cult = (Get-Culture).Name
-    if ($cult -eq 'en-US') { "地区=ok" } else { "地区=fail:$cult" }
+    $targetCulture = if ($region.culture) { $region.culture } else { $CULTURE_TARGET }
+    if ($cult -eq $targetCulture) { "地区=ok:$cult" } else { "地区=fail:$cult(期望$targetCulture)" }
 
-    $v6off = [bool](Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
+    $v6off = [bool](Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
     if (-not $v6off) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭" }
 
     $dns = (Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
@@ -200,8 +254,15 @@ function Invoke-Fix {
 
     # B. 时区/IPv6/DNS/保镖(需管理员:通过 UAC 弹一次)
     $adminScript = @()
-    if ((Get-TimeZone).Id -ne $TZ_TARGET) { $adminScript += "Set-TimeZone -Id '$TZ_TARGET'" }
-    if (Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
+    $targetZone = if ($regionConfig.tz_windows) { [string]$regionConfig.tz_windows } else { $TZ_TARGET }
+    $targetCulture = if ($regionConfig.culture) { [string]$regionConfig.culture } else { $CULTURE_TARGET }
+    if ((Get-TimeZone).Id -ne $targetZone) { $adminScript += "Set-TimeZone -Id '$targetZone'" }
+    if ((Get-Culture).Name -ne $targetCulture) {
+        try { Set-Culture -CultureInfo $targetCulture -ErrorAction Stop; "FIX:地区格式($targetCulture) ✓" }
+        catch { "FIX:地区格式($targetCulture) ✗：$($_.Exception.Message)" }
+    }
+    $adminScript += ". '$PSScriptRoot\region-functions.ps1'; `$region = Get-Content '$REGION_FILE' -Raw | ConvertFrom-Json; Apply-RegionSystemSettings `$region | Out-Null"
+    if (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled }) { $adminScript += "Get-NetAdapter -Physical | Get-NetAdapterBinding -ComponentID ms_tcpip6 | Disable-NetAdapterBinding -Confirm:`$false" }
     $adminScript += "Clear-DnsClientCache"
     if (-not (Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue)) {
         $adminScript += "`$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$BASE\claude-bodyguard.ps1`"'; `$t = New-ScheduledTaskTrigger -AtLogOn; Register-ScheduledTask -TaskName 'ClaudeBodyguard' -Action `$a -Trigger `$t -Force | Out-Null; Start-ScheduledTask -TaskName 'ClaudeBodyguard'"
@@ -277,8 +338,27 @@ function Stop-ClaudeApp {
 }
 
 function Save-Account($name) {
-    robocopy "$DATA" "$BASE\accounts\$name" /MIR /NFL /NDL /NJH /NJS | Out-Null
-    Log "已存档账号$name"
+    $dest = Join-Path "$BASE\accounts" $name
+    $stage = "$dest.new"
+    $previous = "$dest.previous"
+    if ((Test-Path $stage) -or (Test-Path $previous)) {
+        throw "账号$name 存在待恢复快照($stage 或 $previous)，请先确认数据后手动处理"
+    }
+    if (-not (Test-Path $DATA)) { throw "当前 Claude 数据目录不存在，无法归档账号$name" }
+    robocopy "$DATA" "$stage" /MIR /NFL /NDL /NJH /NJS | Out-Null
+    $copyCode = $LASTEXITCODE
+    if ($copyCode -ge 8 -or -not (Test-Path $stage)) {
+        throw "账号$name 归档失败(robocopy=$copyCode)，原数据未删除"
+    }
+    $hadPrevious = Test-Path $dest
+    try {
+        if ($hadPrevious) { Move-Item -LiteralPath $dest -Destination $previous -ErrorAction Stop }
+        Move-Item -LiteralPath $stage -Destination $dest -ErrorAction Stop
+    } catch {
+        if ((Test-Path $previous) -and -not (Test-Path $dest)) { Move-Item -LiteralPath $previous -Destination $dest -ErrorAction SilentlyContinue }
+        throw "账号$name 快照替换失败: $($_.Exception.Message)"
+    }
+    Log "已存档账号$name (robocopy=$copyCode)"
 }
 
 function Start-ClaudeApp {
@@ -287,30 +367,77 @@ function Start-ClaudeApp {
 }
 
 function Invoke-Switch($target) {
+    if ($target -notin @('A','B')) { "FAIL:目标账号必须是 A 或 B"; return }
+    $targetArchive = "$BASE\accounts\$target"
+    if ((Test-Path "$targetArchive.new") -or ((Test-Path "$targetArchive.previous") -and -not (Test-Path $targetArchive))) {
+        "FAIL:账号$target 存在待恢复快照(.new/.previous)，请先确认并手动处理"; return
+    }
+    if ((Test-Path "$DATA.new") -or (Test-Path "$DATA.previous")) {
+        "FAIL:发现残留 Claude 数据目录(.new/.previous)，请先确认并手动处理"; return
+    }
+    $checkLines = @(Invoke-CheckDetail)
+    $failedChecks = @($checkLines | Where-Object { $_ -match '^[^=]+=fail:' })
+    if ($failedChecks.Count -gt 0) {
+        "FAIL:安全检查未通过，已阻止启动 Claude：$($failedChecks -join '; ')"
+        return
+    }
     $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
+    $enrolledNow = $false
 
     # 首次运行:收编当前登录为账号A
     if ($cur -eq 'none' -and (Test-Path $DATA) -and (Get-ChildItem $DATA -ErrorAction SilentlyContinue)) {
         if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
-        Save-Account A
+        try { Save-Account A } catch { "FAIL:$($_.Exception.Message)"; return }
         $cur = 'A'; 'A' | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
+        $enrolledNow = $true
         Log "首次运行:当前登录状态已收编为账号A"
         "NOTE:已将当前登录收编为账号A"
     }
 
-    if ($cur -eq $target) { Start-ClaudeApp; "INFO:当前已是账号$target"; return }
+    if ($cur -eq $target) {
+        if ($enrolledNow) { Remove-Item "$BASE\accounts\$target.previous" -Recurse -Force -ErrorAction SilentlyContinue }
+        Start-ClaudeApp; "INFO:当前已是账号$target"; return
+    }
 
     if (-not (Stop-ClaudeApp)) { "FAIL:Claude 未能退出，请手动退出后重试"; return }
 
-    if ($cur -ne 'none' -and (Test-Path $DATA)) { Save-Account $cur }
+    if ($cur -ne 'none' -and (Test-Path $DATA) -and -not $enrolledNow) {
+        try { Save-Account $cur } catch { "FAIL:$($_.Exception.Message)"; return }
+    }
 
     if (Test-Path "$BASE\accounts\$target") {
-        Remove-Item $DATA -Recurse -Force -ErrorAction SilentlyContinue
-        robocopy "$BASE\accounts\$target" "$DATA" /E /NFL /NDL /NJH /NJS | Out-Null
+        $dataStage = "$DATA.new"
+        if (Test-Path $dataStage) { "FAIL:发现残留数据目录 $dataStage，请确认后手动处理"; return }
+        robocopy "$targetArchive" "$dataStage" /E /NFL /NDL /NJH /NJS | Out-Null
+        $restoreCode = $LASTEXITCODE
+        if ($restoreCode -ge 8 -or -not (Test-Path $dataStage)) {
+            Remove-Item $dataStage -Recurse -Force -ErrorAction SilentlyContinue
+            "FAIL:账号$target 恢复失败(robocopy=$restoreCode)，当前数据未覆盖"; return
+        }
+        $dataPrevious = "$DATA.previous"
+        if (Test-Path $dataPrevious) { "FAIL:发现残留数据目录 $dataPrevious，请确认后手动处理"; return }
+        try {
+            if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
+            Move-Item -LiteralPath $dataStage -Destination $DATA -ErrorAction Stop
+        }
+        catch {
+            if ((Test-Path $dataPrevious) -and -not (Test-Path $DATA)) { Move-Item -LiteralPath $dataPrevious -Destination $DATA -ErrorAction SilentlyContinue }
+            "FAIL:账号$target 原子替换失败: $($_.Exception.Message)"; return
+        }
+        Remove-Item $dataPrevious -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$targetArchive.previous" -Recurse -Force -ErrorAction SilentlyContinue
         Log "已载入账号$target 存档"
     } else {
-        Remove-Item $DATA -Recurse -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+        $dataPrevious = "$DATA.previous"
+        if (Test-Path $dataPrevious) { "FAIL:发现残留数据目录 $dataPrevious，请确认后手动处理"; return }
+        try {
+            if (Test-Path $DATA) { Move-Item -LiteralPath $DATA -Destination $dataPrevious -ErrorAction Stop }
+            New-Item -ItemType Directory -Force -Path $DATA -ErrorAction Stop | Out-Null
+        } catch {
+            if ((Test-Path $dataPrevious) -and -not (Test-Path $DATA)) { Move-Item -LiteralPath $dataPrevious -Destination $DATA -ErrorAction SilentlyContinue }
+            "FAIL:无法初始化账号$target 数据目录: $($_.Exception.Message)"; return
+        }
+        Remove-Item $dataPrevious -Recurse -Force -ErrorAction SilentlyContinue
         Log "账号$target 无存档，将以全新状态初始化"
     }
     $target | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
@@ -328,5 +455,6 @@ switch ($args[0]) {
     'status' { Invoke-Status }
     'fix'    { Invoke-Fix }
     'switch' { Invoke-Switch $args[1] }
-    default  { "用法: claude-switch.ps1 checkdetail|status|fix|switch A|B" }
+    'set-region' { Invoke-SetRegion }
+    default  { "用法: claude-switch.ps1 checkdetail|status|fix|set-region|switch A|B" }
 }

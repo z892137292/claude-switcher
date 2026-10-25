@@ -51,7 +51,21 @@ while ($true) {
         $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
         if ($p) {
             $p | Stop-Process -Force
-            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(内核或TUN丢失),已自动关闭 Claude" | Out-File -Append -Encoding utf8 $LOG
+            $message = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(内核或TUN丢失),已自动关闭 Claude"
+            $message | Out-File -Append -Encoding utf8 $LOG
+            try {
+                Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+                $notify = New-Object System.Windows.Forms.NotifyIcon -ErrorAction Stop
+                $notify.Icon = [System.Drawing.SystemIcons]::Warning
+                $notify.Visible = $true
+                $notify.BalloonTipTitle = 'Claude 已安全关闭'
+                $notify.BalloonTipText = '代理隧道离线，已自动关闭 Claude。请检查代理后再启动。'
+                $notify.ShowBalloonTip(5000)
+                Start-Sleep -Seconds 2
+                $notify.Dispose()
+            } catch {
+                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 托盘通知失败: $($_.Exception.Message)" | Out-File -Append -Encoding utf8 $LOG
+            }
         }
     } else {
         $offline = $false
