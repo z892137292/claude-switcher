@@ -1,77 +1,71 @@
-# Claude 切换器 · Windows 版 (Beta)
+# Claude 切换器 · Windows（Claude Code 默认模式，Beta）
 
-> ⚠️ **本版本为 Beta,未经大规模真机测试**。核心逻辑移植自 macOS 稳定版,但 Windows 环境差异大,遇到问题请到 [Issues](https://github.com/YOURSJEYO/claude-switcher/issues) 反馈。
+本版默认在新 PowerShell 终端中运行 **Claude Code CLI**，无需安装 Claude 桌面客户端。A/B 使用官方支持的 `CLAUDE_CONFIG_DIR` 配置目录，不搬移登录凭据，不复制桌面账号快照。
 
-## 系统要求
+## 安装和使用
 
-- Windows 10 / 11 (64 位)
-- PowerShell 5.1+（Windows 自带,无需安装）
-- 代理客户端（需支持 TUN 模式），安装器会自动探测并写入 `$PROXY_MODE`:
-  - **Clash Verge** —— 存在配置目录即识别，可自动写入置顶规则
-  - **sing-box / ClashX / Surge / WireGuard** —— 按进程或服务识别
-  - **其他 TUN 客户端**（Astrill / OpenVPN / Tailscale 等）—— 安装时选 `other`
-  - **auto** —— 任一已知进程/服务命中即视为在线（未识别到客户端时的默认选项）
-- Claude 桌面版 Windows
-- 安装时需要**管理员权限**（注册守护任务 / 设置时区和地区 / 关闭 IPv6）
+1. 先在普通 PowerShell 中确认 `claude --version` 能运行。支持原生安装的 `claude.exe` 和 npm 的 `claude.cmd` / `claude.ps1`。如果刚安装 Code，请退出并重开切换器，让 PATH 更新。
+2. 开启代理客户端的 TUN 模式，下载本开发分支的完整 ZIP 并解压。不要只替换一个脚本。
+3. 用管理员 PowerShell 执行 `windows\install.ps1`（也可运行 `windows\install.bat`）。安装器更新脚本和守护任务，切换到 Code 模式，保留原出口基准及账号配置。
+4. 打开桌面「Claude切换器」，等待安全检查，点「选择项目」并选择要开发的文件夹。
+5. 点「Code A · 原有配置」：在所选项目目录打开 `claude`，使用 `%USERPROFILE%\.claude`，保留该目录已有登录。
+6. 点「Code B · 独立配置」：使用 `%USERPROFILE%\.claude-switcher\code-profiles\B`。首次按 Claude Code 提示登录，以后继续使用该配置。
 
-> 代理模式同时写入 `%USERPROFILE%\.claude-switcher\proxy-mode.txt`，保镖按这个文件分派检测逻辑；缺失时按旧版 Clash Verge 行为处理。
+A/B 可以各开一个终端；点击另一个配置不会强制关闭正在工作的 Code。界面只报告终端启动结果，不认定登录成功或订阅可用，具体状态以 Code 终端为准。终端退出后按回车关闭窗口。
 
-## 安装
+如果平时设置了自定义 `CLAUDE_CONFIG_DIR`，本版 A 仍明确使用默认的 `%USERPROFILE%\.claude`，不会自动导入那个自定义目录。也不会导入 VS Code 扩展的独立登录或接管已经打开的 IDE 会话。
 
-1. 先开启代理（TUN 模式）。安装器按出口 IP 自动识别国家、IANA 时区和地区格式，写入 `%USERPROFILE%\.claude-switcher\region.json`。出口为 `CN` 时会拒绝同步；只有确需跳过 CN 限制时才设置 `$env:FORCE=1`
-2. 右键 `install.ps1` →「使用 PowerShell 运行」,或在管理员 PowerShell 中执行
-3. 如果提示禁止运行脚本,先执行一次:
-   ```powershell
-   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-   ```
-4. 按提示确认/选择代理客户端，走完流程后桌面会出现「Claude切换器」快捷方式
-5. 安装器会注册登录启动及每 5 分钟运行的地区看门狗，并在结束时列出完整检查结果
+## 出口和保护边界
 
-换节点后可以在界面点「同步地区」，或运行：
+`region.json` 记录固定 IP、国家、时区和地区格式。缺失、损坏、IP/国家不匹配或探测失败会阻止启动；Code 真正运行前会再次核验出口、TUN 和保镖状态。
+
+保镖通过启动记录里的 PID 和进程开始时间识别本工具的终端，并在网络检查失败时请求关闭该终端及其子进程，包括 npm 模式的 cmd/node 子进程。**不会按名字关闭全部 node.exe，也不会接管你另外打开的 Claude Code 或 VS Code 扩展。** 如关闭进程失败，日志会注明未完成并在下一轮重试。
+
+每轮检查后等待 10 秒，另加最长约 8 秒出口请求和调度时间。这是进程巡检，存在检测窗口，不能替代防火墙断网规则，探测请求自身也可能经过变化后的网络。TUN 网卡存在不等于全部流量已接管；规则是静态检查；STUN 无响应只显示未确认警告。
+
+所有 14 个检查项必须唯一且完整；失败、缺项、重复和未知状态阻止启动，警告/信息项供参考。HTTP 探测不代表账号已登录。
+
+地区看门狗只恢复保存的时区和格式，不自动接受新出口。确需更换出口时：退出本工具的 Code 会话，在界面点「重新锁定出口」并确认。安装升级不会覆盖已有基准；旧基准缺少 `exit_ip` 时，先从新版目录运行 `claude-switch.ps1 set-region` 明确重锁，再安装。
+
+## 认证说明
+
+配置隔离采用 [Claude Code 官方多账号方式](https://code.claude.com/docs/en/authentication#log-in-with-multiple-accounts)。首次登录交给官方 CLI；本工具不读取或记录密码、Cookie、API Key、OAuth Token。
+
+继承的 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 或云供应商变量可能优先于目录里的登录。终端只提示变量名，不输出值，不擅自删除或更改变量。共用同一 API Key 时，A/B 不代表不同计费账号；项目/组织配置也仍可能影响认证。官方说明中，不使用 API Key 的两组 Claude Console 登录不能仅靠配置目录隔离。
+
+## 文件和兼容
+
+- `launch.json`：模式和项目路径；默认 `code`。CLI 可运行 `claude-switch.ps1 set-project "D:\项目目录"` 保存项目。
+- `code-current.txt`：最近启动的 Code 配置；与旧桌面模式的 `current.txt` 分开。
+- `code-runs/`：终端进程身份及启动状态，不含凭据。
+- `code-profiles/B/`：B 的私有配置，包含 Code 自己保存的登录资料，请勿提交到 Git 或上传诊断。
+- 原有 `accounts/` 桌面快照保持原样，不作为 Code 凭据使用。核心仍保留 `set-mode desktop` 供旧桌面模式使用，但新版 UI 面向 Code。
+- Windows PowerShell 5.1+；脚本保持 UTF-8 BOM，后台操作通过 UTF-8 文件返回结果，避免中文错误被控制台代码页破坏。
+- 卸载默认保留 `accounts/` 和 `code-profiles/`，A 的原有 `.claude` 目录不属于卸载范围。
+
+## 验证
+
+在仓库根目录运行：
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude-switcher\claude-switch.ps1" set-region
+powershell -NoProfile -File tests/windows-safety.ps1
+powershell -NoProfile -File tests/windows-code.ps1
 ```
-目标国家、时区和 culture 保存在 `region.json`，不再靠改写核心脚本。看门狗检测到出口国家变化时会要求连续两次探测一致后再切换；时区/地区设置漂移会自动恢复，日志位于 `%USERPROFILE%\.claude-switcher\region-watchdog.log`。设置系统时区/位置时如非管理员会弹出一次 UAC；未知的 IANA 时区会明确警告并保留现有时区，不会静默套用美东时区。
 
-## 多代理客户端支持
+GitHub Actions 分别用 Windows PowerShell 5.1 和 PowerShell 7 跑隔离测试。Code 测试使用临时目录和假 CLI，验证 A/B 配置、项目路径、中文结果、进程树与 PID 复用保护，不接触真实账号或代理。真实 Code 登录、代理中断和 WPF 仍需真机验收。
 
-| 客户端 | `$PROXY_MODE` | 存活判定 | 说明 |
-|---|---|---|---|
-| Clash Verge | `clash-verge` | `verge-mihomo` 进程 + TUN | 支持自动写入置顶规则 |
-| sing-box | `sing-box` | `sing-box` 进程 + TUN | 置顶规则需自行配置 |
-| ClashX | `clashx` | `ClashX` 进程 + TUN | 置顶规则需自行配置 |
-| Surge | `surge` | `Surge` 进程 + TUN | 置顶规则需自行配置 |
-| WireGuard | `wireguard` | `WireGuardTunnel*` 服务 + TUN | 置顶规则需自行配置 |
-| 其他 TUN 客户端 | `other` | 仅 TUN | 不要求特定进程，避免误杀 |
-| 自动 | `auto` | 任一已知进程/服务 + TUN | 保镖在 `auto` 下同样只查 TUN |
+## UDP/STUN 诊断
 
-TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）；没有则回退到任意处于 `Up` 状态、描述匹配 `TAP/TUN/WireGuard/Wintun/VPN/Tailscale` 的虚拟网卡。198.18 命中时保持原来的 `TUN网卡=ok`；回退命中时显示 `TUN网卡=ok:通用虚拟网卡`。
+WebRTC 行实际运行独立的 IPv4 UDP STUN 探针，不是浏览器 ICE 测试，也不能覆盖所有 IPv6 或浏览器特有行为。
 
-## 与 macOS 版的差异（注意事项）
+每个服务器设置 DNS 等待 1.5 秒、网络阶段共 4 秒；同一套接字/事务最多发送两次。四个服务器顺序执行，全部超时可能约 22 秒，另加调度/处理时间。报文校验包含 Binding 响应类型、magic cookie、事务 ID、消息长度和属性边界，支持 MAPPED/XOR-MAPPED 地址解析。仅所有服务器返回有效且一致的出口时显示绿色；部分失败保持黄色，发现不同出口时显示红色并要求核实路由，不直接断言一定是本地真实 IP 泄漏。
 
-> Windows 版地区目标按出口 IP 自动配置，支持 `set-region` 和地区看门狗；时区映射表覆盖多个主流国家/城市。未覆盖的 IANA 时区会警告并保留当前系统时区。Shadowrocket 仅 macOS 可用；自动更新与 48 小时 IP 审查目前仅 macOS 版提供。
+点击「复制诊断报告」会附上 STUN 明细；或「打开日志」查看 `stun-diagnostics.txt`。文件含生成时间、公开服务器名称、状态、发送/接收字节、尝试次数、无效报文数和耗时；映射 IP 脱敏，不记录原始报文或凭据。
 
-| 项目 | 说明 |
-|---|---|
-| 地区同步 | `region.json` 记录国家、Windows/IANA 时区、culture 与最近更新时间；出口国家切换需连续两次探测一致 |
-| 时区名称 | Windows 使用 `Eastern Standard Time` 等 Windows ID；未识别映射时不会回退到美东时区 |
-| 地区看门狗 | `ClaudeRegionWatchdog` 登录启动并每 5 分钟运行，隐藏窗口、最高权限；日志为 `region-watchdog.log` |
-| 保镖频率 | 计划任务登录启动,隐藏窗口常驻,每 10 秒巡检(与 Mac 一致) |
-| 保镖判定 | 显式客户端模式按「客户端进程/服务 + TUN」；`auto` / `other` 只查 TUN |
-| IPv6 | 关闭的是物理网卡的 ms_tcpip6 绑定；恢复命令见卸载提示 |
-| SmartScreen | 首次运行可能弹"Windows 已保护你的电脑" → 点「更多信息」→「仍要运行」 |
-| 账号数据目录 | Windows 版在 `%APPDATA%\Claude`(与 macOS 路径不同,逻辑相同) |
-| 卸载 | 运行 `uninstall.bat`，或管理员 PowerShell 执行 `uninstall.ps1`；默认保留 accounts 账号存档 |
+- `timeout`：发送后截止期限内没有收到数据报。
+- `invalid_response`：收到了数据，但报文无效或事务不匹配；具体原因在 detail。
+- `dns_error` / `dns_timeout` / `dns_no_ipv4`：发送前的名称解析阶段失败。
+- `send_error` / `receive_error`：套接字收发错误，detail 给出错误类别。
+- `stun_error`：服务端返回 STUN 错误码。
 
-## 已知限制
-
-- 设备指纹体检（`fingerprint`）与 Web 检测页为 macOS/浏览器能力，Windows 版暂未内置，可用 Web 版检查 Canvas/WebGL。
-- 界面是 WPF 重写的第一版,样式以 Mac 版为准对齐,细节可能有出入
-- Clash Verge 的 TUN 开关在 Windows 上如果被更新重置,目前需要手动在设置里重新打开(一键修复会提示)
-- 账号快照切换前请确保 Claude 已完全退出(托盘图标也要退出)
-- 任意安全检查 `fail` 都会阻止启动 Claude；切换归档使用 robocopy 退出码 0–7 成功并做 `.new` / `.previous` 原子替换。遇到待恢复快照时先确认数据，不要直接删除。
-- 界面检查/修复在后台执行；「复制诊断报告」会对 IPv4 脱敏，「打开日志」打开配置目录。保镖关闭 Claude 时会尝试显示 Windows 托盘通知，通知失败会记入 `bodyguard.log`。
-- **`auto` / `other` 的 TUN 判定是通用启发式**:只要有一块处于 `Up` 状态、描述里带 `TAP/TUN/WireGuard/Wintun/VPN/Tailscale` 的网卡就会判定 TUN 在线,无法区分"代理隧道已接管"还是"某块虚拟网卡只是存在"。可能误判(例如虚拟网卡残留、其他 VPN 适配器),此时请把 `$PROXY_MODE` 改成实际客户端后重跑安装器;若仍不稳定,可在计划任务中暂停 `ClaudeBodyguard`
-- **非 Clash 客户端**:保镖已按客户端模式分派,不再因缺少 `verge-mihomo` 每 10 秒误杀 Claude;`规则置顶` 检查只读 Clash Verge 的 `profiles\Merge.yaml` 与 `clash-verge.yaml`，非 Clash 用户需自行配置 Claude 域名及 STUN 端口规则。`DNS` 检查也按 `198.18.x.x` 判断,使用非 fake-ip TUN 时可能显示 `fail`,不代表代理不可用
-- Windows 版仍为 Beta，未覆盖的 IANA 时区将保留现有时区；`Set-WinSystemLocale` 的系统级设置可能需注销或重启后完全生效。
-- 系统区域为 zh-CN(控制台代码页 936/GBK)时,界面通过读取核心脚本落盘的 `last-check.txt`(UTF-8)展示检查结果,不受代码页影响;若你看到"检测输出不完整(3/14)"且用的是旧版界面,请更新到最新版
+测试：`powershell -NoProfile -File tests/windows-stun.ps1`。使用合成报文和本机 UDP 回环，不连接公共 STUN 或修改代理。不要为了测试变绿而改为直连或关闭防火墙。

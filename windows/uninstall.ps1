@@ -22,17 +22,15 @@ Write-Host '已删除 ClaudeBodyguard / ClaudeRegionWatchdog 计划任务和桌�
 if (Test-Path $BASE) {
     $remove = Read-Host "是否删除 $BASE 下的配置和日志？(y/N)"
     if ($remove -match '^(y|yes)$') {
-        $deleteAccounts = Read-Host '是否同时删除 accounts 账号存档？(y/N，默认保留)'
+        $deleteAccounts = Read-Host '是否同时删除 accounts / code-profiles 账号配置？(y/N，默认保留)'
         if ($deleteAccounts -match '^(y|yes)$') {
             Remove-Item -LiteralPath $BASE -Recurse -Force -ErrorAction SilentlyContinue
         } else {
-            $accounts = Join-Path $BASE 'accounts'
-            $keep = Join-Path $env:TEMP ("claude-switcher-accounts-" + [guid]::NewGuid().ToString('N'))
-            if (Test-Path $accounts) { Move-Item -LiteralPath $accounts -Destination $keep -Force }
-            Remove-Item -LiteralPath $BASE -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force -Path $BASE | Out-Null
-            if (Test-Path $keep) { Move-Item -LiteralPath $keep -Destination (Join-Path $BASE 'accounts') }
-            Write-Host '配置和日志已删除，accounts 账号存档已保留。'
+            # Leave credential directories in place; never move them before deleting BASE.
+            Get-ChildItem -LiteralPath $BASE -Force | Where-Object { $_.Name -notin @('accounts','code-profiles') } |
+                Remove-Item -Recurse -Force -ErrorAction Stop
+            Write-Host '配置和日志已删除，accounts 和 code-profiles 账号配置已保留。'
+
         }
     } else {
         Write-Host '已保留配置和账号存档。'

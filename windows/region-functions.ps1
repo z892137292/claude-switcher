@@ -79,14 +79,11 @@ function Get-RegionInfo {
     $iana = if ($info -and $info.timezone) { [string]$info.timezone } else { '' }
     $ip = if ($info -and $info.ip) { [string]$info.ip } else { '' }
     $org = if ($info -and $info.org) { [string]$info.org } else { '' }
+    # A fallback must supply one complete observation, never a mix of two exits.
     if (-not $country -or -not $ip) {
-        try {
-            $trace = & curl.exe -s --max-time 8 'https://www.cloudflare.com/cdn-cgi/trace' 2>$null
-            if ($LASTEXITCODE -eq 0 -and $trace) {
-                if (-not $country) { $country = (($trace -split "`n" | Where-Object { $_ -match '^loc=' } | Select-Object -First 1) -replace '^loc=','').Trim() }
-                if (-not $ip) { $ip = (($trace -split "`n" | Where-Object { $_ -match '^ip=' } | Select-Object -First 1) -replace '^ip=','').Trim() }
-            }
-        } catch {}
+        $country = ''; $ip = ''; $iana = ''; $org = ''
+        $fallback = Get-Egress
+        $country = $fallback.loc; $ip = $fallback.ip
     }
     if (-not $iana) {
         try {
@@ -100,7 +97,7 @@ function Get-RegionInfo {
         $culture = 'en-US'
         Write-Warning "国家 $country 没有地区格式映射，使用 en-US。"
     }
-    $tzWindows = $script:IanaWindowsTimeZoneMap[$iana]
+    $tzWindows = if ($iana) { $script:IanaWindowsTimeZoneMap[$iana] } else { '' }
     if (-not $tzWindows) {
         Write-Warning "无法将 IANA 时区 '$iana' 映射为 Windows 时区；保持当前时区不变。"
     }
@@ -112,11 +109,27 @@ function Get-RegionInfo {
 
 function Save-RegionInfo($region, [string]$path) {
     $exitIp = if ($region.exit_ip) { [string]$region.exit_ip } else { [string]$region.ip }
-    $lockedAt = if ($region.locked_at) { [string]$region.locked_at } else { (Get-Date).ToString('o') }
-    [pscustomobject]@{
-        exit_ip=$exitIp; country=$region.country; tz_iana=$region.tz_iana; tz_windows=$region.tz_windows
+    $lockedAt = if ($region.locked_at -is [datetime] -or $region.locked_at -is [datetimeoffset]) { $region.locked_at.ToString('o') } elseif ($region.locked_at) { [string]$region.locked_at } else { (Get-Date).ToString('o') }
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($exitIp, [ref]$parsedIp) -or $region.country -notmatch '^[A-Za-z]{2}$') {
+        throw '出口IP或国家无效，未写入基准'
+    }
+    $json = [pscustomobject]@{
+        exit_ip=$parsedIp.ToString(); country=([string]$region.country).ToUpperInvariant(); tz_iana=$region.tz_iana; tz_windows=$region.tz_windows
         culture=$region.culture; locked_at=$lockedAt; asn=$region.asn
-    } | ConvertTo-Json | Set-Content -Path $path -Encoding UTF8
+    } | ConvertTo-Json
+    # Same-directory atomic replacement keeps a partial JSON write out of the guard.
+    $temp = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding -ArgumentList $true))
+        if ([System.IO.File]::Exists($path)) {
+            $backup = "$temp.bak"
+            [System.IO.File]::Replace($temp, $path, $backup)
+            [System.IO.File]::Delete($backup)
+        }
+        else { [System.IO.File]::Move($temp, $path) }
+    } finally { if ([System.IO.File]::Exists($temp)) { [System.IO.File]::Delete($temp) } }
+
 }
 
 function Protect-ExitIp([string]$ip) {
@@ -128,11 +141,14 @@ function Protect-ExitIp([string]$ip) {
 function Test-RegionEgressMatch([string]$currentIp, [string]$currentCountry, $lockedRegion) {
     $expectedIp = if ($lockedRegion) { [string]$lockedRegion.exit_ip } else { '' }
     $expectedCountry = if ($lockedRegion) { ([string]$lockedRegion.country).ToUpperInvariant() } else { '' }
-    $ipOk = $currentIp -and $expectedIp -and ($currentIp -ceq $expectedIp)
-    $countryOk = $currentCountry -and $expectedCountry -and (([string]$currentCountry).ToUpperInvariant() -ceq $expectedCountry)
+    $currentAddress = $null; $expectedAddress = $null
+    $validCurrent = [System.Net.IPAddress]::TryParse($currentIp, [ref]$currentAddress)
+    $validExpected = [System.Net.IPAddress]::TryParse($expectedIp, [ref]$expectedAddress)
+    $ipOk = $validCurrent -and $validExpected -and $currentAddress.Equals($expectedAddress)
+    $countryOk = $currentCountry -match '^[A-Za-z]{2}$' -and $expectedCountry -match '^[A-Z]{2}$' -and (([string]$currentCountry).ToUpperInvariant() -ceq $expectedCountry)
     $reason = ''
-    if (-not $lockedRegion -or -not $expectedIp -or -not $expectedCountry) { $reason = '基准环境缺少锁定出口IP或国家' }
-    elseif (-not $currentIp -or -not $currentCountry) { $reason = '无法获取当前出口IP或国家' }
+    if (-not $lockedRegion -or -not $validExpected -or $expectedCountry -notmatch '^[A-Z]{2}$') { $reason = '基准环境缺少锁定出口IP或国家' }
+    elseif (-not $validCurrent -or $currentCountry -notmatch '^[A-Za-z]{2}$') { $reason = '无法获取当前出口IP或国家' }
     elseif (-not $ipOk) { $reason = "出口IP偏离：当前 $(Protect-ExitIp $currentIp)，期望 $(Protect-ExitIp $expectedIp)" }
     elseif (-not $countryOk) { $reason = "出口国家偏离：当前 $currentCountry，期望 $expectedCountry" }
     return [pscustomobject]@{ passed=[bool]($ipOk -and $countryOk); ip_ok=[bool]$ipOk; country_ok=[bool]$countryOk; reason=$reason }
@@ -161,4 +177,33 @@ function Apply-RegionSystemSettings($region) {
     }
     try { Set-WinSystemLocale -SystemLocale $region.culture -ErrorAction Stop; $results += '系统区域格式已设置' } catch { $results += "系统区域格式设置失败: $($_.Exception.Message)" }
     return $results
+}
+
+function Get-Egress {
+    $ip = ''; $loc = ''
+    try {
+        $trace = & curl.exe -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $trace) {
+            $ip  = (($trace -split "`n" | Where-Object { $_ -like 'ip=*' } | Select-Object -First 1) -replace '^ip=','').Trim()
+            $loc = ((($trace -split "`n" | Where-Object { $_ -like 'loc=*' } | Select-Object -First 1) -replace '^loc=','').Trim()).ToUpperInvariant()
+        }
+    } catch {}
+    return @{ ip = $ip; loc = $loc }
+}
+
+
+# Require one recognized result for each check. Missing/duplicate/unknown states block startup.
+function Test-CheckReport([string[]]$lines) {
+    $expected = @('代理内核','TUN网卡','出口IP','IP一致','时区','地区','IPv6','DNS','WebRTC','保镖','规则置顶','客户端语言','ASN属性','生态可达性')
+    $seen = @{}; $problems = @()
+    foreach ($line in $lines) {
+        $kv = $line -split '=', 2
+        if ($kv.Count -ne 2 -or $expected -notcontains $kv[0]) { continue }
+        if ($seen.ContainsKey($kv[0])) { $problems += "重复检查项: $($kv[0])"; continue }
+        $seen[$kv[0]] = $true
+        $state = ($kv[1] -split ':', 2)[0]
+        if ($state -notin @('ok','warn','info')) { $problems += $line }
+    }
+    foreach ($name in $expected) { if (-not $seen.ContainsKey($name)) { $problems += "缺少检查项: $name" } }
+    return [pscustomobject]@{ passed=($problems.Count -eq 0); errors=@($problems) }
 }
