@@ -103,7 +103,10 @@ try {
         Copy-Item (Join-Path $root 'windows/code-session.ps1') $BASE
         Copy-Item (Join-Path $root 'windows/code-functions.ps1') $BASE
         "'OK:code-preflight'" | Set-Content (Join-Path $BASE 'claude-switch.ps1') -Encoding UTF8
-        @('@echo off','echo %CLAUDE_CONFIG_DIR%>"%USERPROFILE%\observed-profile.txt"','cd>"%USERPROFILE%\observed-workspace.txt"','exit /b 0') | Set-Content $npm -Encoding ascii
+        # cmd.exe redirection uses the console code page; record Unicode paths as UTF-8.
+        $probe = "[IO.File]::WriteAllText((Join-Path `$env:USERPROFILE 'observed-profile.txt'),`$env:CLAUDE_CONFIG_DIR,[Text.Encoding]::UTF8); [IO.File]::WriteAllText((Join-Path `$env:USERPROFILE 'observed-workspace.txt'),(Get-Location).Path,[Text.Encoding]::UTF8)"
+        $probeEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+        @('@echo off', "powershell.exe -NoLogo -NoProfile -EncodedCommand $probeEncoded", 'exit /b %ERRORLEVEL%') | Set-Content $npm -Encoding ascii
         $inputFile=Join-Path $sandbox 'input.txt';"`n" | Set-Content $inputFile
         $oldA=Get-CodeProfilePath A
         New-Item -ItemType Directory $oldA -Force | Out-Null
@@ -115,8 +118,8 @@ try {
             $child=Start-Process powershell.exe -ArgumentList $argsLine -Wait -PassThru -RedirectStandardInput $inputFile -RedirectStandardOutput (Join-Path $sandbox 'out.txt') -RedirectStandardError (Join-Path $sandbox 'err.txt')
             $state=Get-Content (Join-Path $runs "$id.json") -Raw | ConvertFrom-Json
             Assert ($state.status -eq 'exited' -and $state.detail -eq 'exit=0') 'Fake CLI did not finish successfully'
-            Assert ((Get-Content (Join-Path $sandbox 'observed-profile.txt')).Trim() -eq (Get-CodeProfilePath $account)) 'Child did not receive account config directory'
-            Assert ((Get-Content (Join-Path $sandbox 'observed-workspace.txt')).Trim() -eq $project) 'Child started in wrong project directory'
+            Assert ((Get-Content (Join-Path $sandbox 'observed-profile.txt') -Encoding UTF8).Trim() -eq (Get-CodeProfilePath $account)) 'Child did not receive account config directory'
+            Assert ((Get-Content (Join-Path $sandbox 'observed-workspace.txt') -Encoding UTF8).Trim() -eq $project) "Child started in wrong project directory: $((Get-Content (Join-Path $sandbox 'observed-workspace.txt') -Encoding UTF8)) | expected: $project"
             Assert ((Get-Content (Join-Path $oldA 'sentinel')).Trim() -eq 'existing-login-sentinel') 'Existing Code config modified'
         }
         # The caller gets UTF-8 text through a file even on a legacy code page.
