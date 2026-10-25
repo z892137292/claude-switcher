@@ -73,18 +73,6 @@ function Test-TunUp {
     return [bool]$t.up
 }
 
-function Get-Egress {
-    $ip = ''; $loc = ''
-    try {
-        $trace = & curl.exe -s --max-time 8 "https://www.cloudflare.com/cdn-cgi/trace" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $trace) {
-            $ip  = (($trace -split "`n" | Where-Object { $_ -like 'ip=*' } | Select-Object -First 1) -replace '^ip=','').Trim()
-            $loc = ((($trace -split "`n" | Where-Object { $_ -like 'loc=*' } | Select-Object -First 1) -replace '^loc=','').Trim()).ToUpperInvariant()
-        }
-    } catch {}
-    return @{ ip = $ip; loc = $loc }
-}
-
 # STUN 探针(纯 .NET UDP,手工构造 RFC5389 报文)
 function Get-StunPublicIP([string]$server, [int]$port, [int]$timeoutMs = 2000) {
     try { $addr = ([System.Net.Dns]::GetHostAddresses($server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1) } catch { return $null }
@@ -123,26 +111,30 @@ function Test-WebRTC($exitIp) {
         $r = Get-StunPublicIP $s[0] $s[1]
         if ($r -and ($found -notcontains $r)) { $found += $r }
     }
-    if ($found.Count -eq 0) { return @{ code = 'ok'; detail = 'UDP不出网,零暴露' } }
+    if ($found.Count -eq 0) { return @{ code = 'warn'; detail = 'STUN无响应，未观察到候选地址，无法证明UDP无泄漏' } }
     $leak = $found | Where-Object { $_ -ne $exitIp }
     if ($leak) { return @{ code = 'fail'; detail = "暴露非代理IP: $(($leak | ForEach-Object { Protect-ExitIp $_ }) -join ',')" } }
     return @{ code = 'ok'; detail = '仅暴露代理IP' }
 }
 
 function Test-RulesPinned {
+    if (-not $PROXY_GROUP -or $PROXY_GROUP -match '^(DIRECT|REJECT|REJECT-DROP|PASS)$') { return $false }
     $paths = @((Join-Path (Join-Path $CLASH_DIR 'profiles') 'Merge.yaml'), (Join-Path $CLASH_DIR 'clash-verge.yaml')) | Where-Object { Test-Path $_ }
+    $expected = @('DOMAIN-SUFFIX,claude.ai', 'DOMAIN-SUFFIX,anthropic.com', 'DST-PORT,3478', 'DST-PORT,5349', 'DST-PORT,19302')
     foreach ($path in $paths) {
-        $domain = (Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DOMAIN-SUFFIX,claude.ai,$PROXY_GROUP" -Quiet)
-        $ports = $true
-        foreach ($port in @(3478,5349,19302)) {
-            if (-not ((Test-Path $path) -and (Select-String -Path $path -SimpleMatch -Pattern "DST-PORT,$port," -Quiet))) { $ports = $false; break }
+        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8)
+        $allPresent = $true
+        foreach ($rule in $expected) {
+            # Match a complete YAML list item; comments, DIRECT and prefix matches do not count.
+            $pattern = '^\s*-\s*[' + "'" + '"]?' + [regex]::Escape("$rule,$PROXY_GROUP") + '[' + "'" + '"]?\s*(?:#.*)?$'
+            if (-not ($lines | Where-Object { $_ -cmatch $pattern })) { $allPresent = $false; break }
         }
-        if ($domain -and $ports) { return $true }
+        if ($allPresent) { return $true }
     }
     return $false
 }
 
-function Invoke-SetRegion([switch]$Confirm) {
+function Invoke-SetRegion([switch]$Confirmed) {
     $region = Get-RegionInfo
     if (-not $region.country -or -not $region.ip) { "FAIL:无法获取出口IP或国家，请检查网络后重试"; return }
     if ($region.country -eq 'CN' -and $env:FORCE -ne '1') { "FAIL:出口国家为 CN，请先开启代理；如确需跳过，请设置 FORCE=1"; return }
@@ -150,15 +142,16 @@ function Invoke-SetRegion([switch]$Confirm) {
         $region.tz_windows = (Get-TimeZone).Id
         "WARN:无法识别出口时区 $($region.tz_iana)，保留当前时区 $($region.tz_windows)"
     }
-    if ([Console]::IsInputRedirected) {
-        if (-not $Confirm) { "FAIL:非交互场景重新锁定环境必须显式指定 -Confirm"; return }
-    } else {
-        Write-Host "更换出口环境有封号风险。仅在更换 VPS 后重新锁定。"
-        if ((Read-Host '确认重新锁定当前环境？请输入 YES') -cne 'YES') { "FAIL:已取消重新锁定环境"; return }
+    if (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue) {
+        "FAIL:请先完全退出 Claude，再重新锁定出口环境"; return
+    }
+    if (-not $Confirmed) {
+        if ([Console]::IsInputRedirected) { "FAIL:非交互场景必须显式指定 --confirm"; return }
+        if ((Read-Host '确认将当前出口保存为新基准？请输入 YES') -cne 'YES') { "FAIL:已取消重新锁定环境"; return }
     }
     $oldRegion = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
     $region.exit_ip = $region.ip
-    $region.locked_at = (Get-Date).ToString('o')
+    $region | Add-Member -NotePropertyName locked_at -NotePropertyValue (Get-Date).ToString('o') -Force
     New-Item -ItemType Directory -Force -Path $BASE | Out-Null
     Save-RegionInfo $region $REGION_FILE
     Apply-RegionUserSettings $region | Out-Null
@@ -215,16 +208,10 @@ function Invoke-CheckDetail {
 
     $tz = (Get-TimeZone).Id
     $targetTz = if ($region.tz_windows) { $region.tz_windows } else { $TZ_TARGET }
-    if ($targetTz -and $tz -ne $targetTz) {
-        try { Set-TimeZone -Id $targetTz -ErrorAction Stop; $tz = (Get-TimeZone).Id } catch {}
-    }
     if ($tz -eq $targetTz) { "时区=ok:$tz" } else { "时区=fail:$tz(期望$targetTz)" }
 
     $cult = (Get-Culture).Name
     $targetCulture = if ($region.culture) { $region.culture } else { $CULTURE_TARGET }
-    if ($targetCulture -and $cult -ne $targetCulture) {
-        try { Set-Culture -CultureInfo $targetCulture -ErrorAction Stop; $cult = (Get-Culture).Name } catch {}
-    }
     if ($cult -eq $targetCulture) { "地区=ok:$cult" } else { "地区=fail:$cult(期望$targetCulture)" }
 
     $v6off = [bool](Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Get-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq $true })
@@ -237,9 +224,9 @@ function Invoke-CheckDetail {
     "WebRTC=$($w.code):$($w.detail)"
 
     $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
-    if ($bg) { "保镖=ok" } else { "保镖=fail:未安装" }
+    if ($bg -and $bg.State -eq 'Running') { "保镖=ok:运行中" } else { "保镖=fail:未运行，请修复或重新安装" }
 
-    if (Test-RulesPinned) { "规则置顶=ok" } else { "规则置顶=fail:未生效" }
+    if (Test-RulesPinned) { "规则置顶=ok:所需规则已配置(静态检查)" } else { "规则置顶=fail:未生效" }
 
     # 客户端语言: Windows 端 Claude 跟随系统区域格式,地区检查已覆盖
     "客户端语言=ok:跟随系统"
@@ -249,7 +236,8 @@ function Invoke-CheckDetail {
 
     $r1 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://claude.ai/" 2>$null
     $r2 = & curl.exe -s --max-time 8 -o NUL -w '%{http_code}' "https://api.anthropic.com/v1/models" 2>$null
-    if ($r1 -ne '000' -and $r2 -ne '000') { "生态可达性=ok:claude.ai:$r1 api:$r2" } else { "生态可达性=fail:claude.ai:$r1 api:$r2" }
+    if ($r1 -match '^[23][0-9]{2}$' -and $r2 -match '^(2[0-9]{2}|401)$') { "生态可达性=ok:网页:$r1 API:$r2 (无认证探测，不代表账号可用)" }
+    else { "生态可达性=fail:网页:$r1 API:$r2 (访问受限、服务错误或传输失败)" }
 }
 
 function Invoke-Fix {
@@ -290,10 +278,13 @@ function Invoke-Fix {
     if ($adminScript.Count -gt 0) {
         "FIX:修复时区/IPv6/DNS/保镖(需要管理员授权)..."
         $tmp = "$env:TEMP\claude-fix-$([guid]::NewGuid().Guid).ps1"
-        ($adminScript -join "`n") | Out-File -Encoding utf8 $tmp
-        try { Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`"" } catch { "FIX:管理员授权被取消" }
-        Remove-Item $tmp -ErrorAction SilentlyContinue
-        "FIX:时区/IPv6/DNS/保镖 ✓"
+        (@("`$ErrorActionPreference = 'Stop'") + $adminScript) -join "`n" | Out-File -Encoding utf8 $tmp
+        try {
+            $repair = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`""
+            if ($repair.ExitCode -eq 0) { "FIX:系统修复命令已执行，请以重新检查结果为准" }
+            else { "FAIL:系统修复失败(退出码=$($repair.ExitCode))，请重新检查" }
+        } catch { "FAIL:管理员授权被取消或系统修复未执行" }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     } else {
         "FIX:时区/IPv6/保镖 无需修复 ✓"
     }
@@ -338,7 +329,8 @@ prepend-rules:
     # C. 出口IP最终验证
     Start-Sleep 2
     $e = Get-Egress
-    if ($e.loc -eq $COUNTRY_TARGET) { "FIX:出口IP ✓ ($($e.ip))" } else { "FIX:出口IP ✗ ($($e.ip)/$($e.loc),期望$COUNTRY_TARGET) — 请换节点/线路" }
+    $match = Test-RegionEgressMatch $e.ip $e.loc $regionConfig
+    if ($match.passed) { "FIX:出口与锁定基准一致 ✓" } else { "FAIL:$($match.reason)；修复不会改写基准" }
     "FIX:修复流程结束"
 }
 
@@ -382,8 +374,18 @@ function Save-Account($name) {
 }
 
 function Start-ClaudeApp {
+    $locked = try { Get-Content $REGION_FILE -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { $null }
+    $now = Get-Egress
+    $match = Test-RegionEgressMatch $now.ip $now.loc $locked
+    if (-not $match.passed) { throw "启动前出口检查失败：$($match.reason)" }
+    if (-not (Test-ProxyAlive) -or -not (Test-TunUp)) { throw '启动前代理内核或TUN检查失败' }
     $exe = @("$env:LOCALAPPDATA\AnthropicClaude\Claude.exe", "$env:LOCALAPPDATA\Programs\Claude\Claude.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($exe) { Start-Process $exe } else { Start-Process "shell:AppsFolder" -ErrorAction SilentlyContinue }
+    if ($exe) { Start-Process $exe -ErrorAction Stop }
+    else {
+        $app = Get-StartApps | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1
+        if (-not $app.AppID) { throw '未找到 Claude 应用，请先安装 Claude 桌面版' }
+        Start-Process "shell:AppsFolder\$($app.AppID)" -ErrorAction Stop
+    }
 }
 
 function Invoke-Switch($target) {
@@ -396,9 +398,9 @@ function Invoke-Switch($target) {
         "FAIL:发现残留 Claude 数据目录(.new/.previous)，请先确认并手动处理"; return
     }
     $checkLines = @(Invoke-CheckDetail)
-    $failedChecks = @($checkLines | Where-Object { $_ -match '^[^=]+=fail:' })
-    if ($failedChecks.Count -gt 0) {
-        "FAIL:安全检查未通过，已阻止启动 Claude：$($failedChecks -join '; ')"
+    $checkResult = Test-CheckReport $checkLines
+    if (-not $checkResult.passed) {
+        "FAIL:安全检查未通过，已阻止启动 Claude：$($checkResult.errors -join '; ')"
         return
     }
     $cur = if (Test-Path "$BASE\current.txt") { (Get-Content "$BASE\current.txt" -Raw).Trim() } else { 'none' }
@@ -461,6 +463,8 @@ function Invoke-Switch($target) {
         Log "账号$target 无存档，将以全新状态初始化"
     }
     $target | Out-File -Encoding ascii -NoNewline "$BASE\current.txt"
+    # Only after the switch commits can the previous snapshot of the source be retired.
+    if ($cur -in @('A','B')) { Remove-Item "$BASE\accounts\$cur.previous" -Recurse -Force -ErrorAction SilentlyContinue }
     Start-ClaudeApp
     Log "已切换到账号$target 并启动"
     "OK:已切换到账号$target"
@@ -474,7 +478,19 @@ switch ($args[0]) {
     }
     'status' { Invoke-Status }
     'fix'    { Invoke-Fix }
-    'switch' { Invoke-Switch $args[1] }
-    'set-region' { Invoke-SetRegion }
+    'switch' {
+        $mutex = New-Object System.Threading.Mutex -ArgumentList $false, 'Local\ClaudeSwitcherAccountMutation'
+        $acquired = $false
+        try {
+            try { $acquired = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+            if (-not $acquired) { "FAIL:另一个账号操作正在进行，请稍后重试"; exit 1 }
+            Invoke-Switch $args[1]
+        } catch { "FAIL:$($_.Exception.Message)"; exit 1 }
+        finally { if ($acquired) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+    }
+    'set-region' {
+        try { Invoke-SetRegion -Confirmed:($args[1] -ceq '--confirm') }
+        catch { "FAIL:$($_.Exception.Message)"; exit 1 }
+    }
     default  { "用法: claude-switch.ps1 checkdetail|status|fix|set-region|switch A|B" }
 }

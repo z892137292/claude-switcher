@@ -60,7 +60,7 @@ jobs:
           $path = Join-Path $env:RUNNER_TEMP 'region-test.json'
           Save-RegionInfo $region $path
           $saved = Get-Content $path -Raw | ConvertFrom-Json
-          if ($saved.country -ne 'ZZ' -or $saved.ip -or -not $saved.updated_at) { throw 'region.json persistence is invalid' }
+          if ($saved.country -ne 'ZZ' -or $saved.exit_ip -ne '203.0.113.8' -or -not $saved.locked_at) { throw 'region.json persistence is invalid' }
           Remove-Item $path -Force
           $tokens = $null
           $errors = $null
@@ -70,11 +70,11 @@ jobs:
           $global:CLASH_DIR = Join-Path $env:RUNNER_TEMP 'clash-rules-test'
           $global:PROXY_GROUP = 'GLOBAL'
           New-Item -ItemType Directory -Force -Path (Join-Path $global:CLASH_DIR 'profiles') | Out-Null
-          $rules = @('DOMAIN-SUFFIX,claude.ai,GLOBAL','DST-PORT,3478,GLOBAL','DST-PORT,5349,GLOBAL','DST-PORT,19302,GLOBAL')
+          $rules = @('- DOMAIN-SUFFIX,claude.ai,GLOBAL','- DOMAIN-SUFFIX,anthropic.com,GLOBAL','- DST-PORT,3478,GLOBAL','- DST-PORT,5349,GLOBAL','- DST-PORT,19302,GLOBAL')
           $merge = Join-Path $global:CLASH_DIR 'profiles\Merge.yaml'
           $rules | Set-Content $merge
           if (-not (Test-RulesPinned)) { throw 'Merge.yaml pinned-rule detection failed' }
-          $rules[0..2] | Set-Content -Path $merge
+          $rules[0..3] | Set-Content -Path $merge
           if (Test-RulesPinned) { throw 'Missing STUN rule was incorrectly accepted' }
           $rules | Set-Content (Join-Path $global:CLASH_DIR 'clash-verge.yaml')
           if (-not (Test-RulesPinned)) { throw 'clash-verge.yaml pinned-rule detection failed' }

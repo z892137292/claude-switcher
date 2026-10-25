@@ -27,11 +27,17 @@
 4. 按提示确认/选择代理客户端，走完流程后桌面会出现「Claude切换器」快捷方式
 5. 安装器会注册登录启动及每 5 分钟运行的地区看门狗，并在结束时列出完整检查结果
 
-换节点后可以在界面点「同步地区」，或运行：
+首次使用后，出口 IP 与国家固定在 `region.json`。确需更换出口时，先完全退出 Claude，再在界面点「重新锁定出口」并确认，或运行：
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude-switcher\claude-switch.ps1" set-region
 ```
-目标国家、时区和 culture 保存在 `region.json`，不再靠改写核心脚本。看门狗检测到出口国家变化时会要求连续两次探测一致后再切换；时区/地区设置漂移会自动恢复，日志位于 `%USERPROFILE%\.claude-switcher\region-watchdog.log`。设置系统时区/位置时如非管理员会弹出一次 UAC；未知的 IANA 时区会明确警告并保留现有时区，不会静默套用美东时区。
+`region.json` 保存 `exit_ip`、`country`、Windows/IANA 时区、culture、`locked_at` 和 ASN。启动、启动前最后一刻与保镖巡检都验证出口；缺失、损坏、IP/国家改变或探测失败都会阻止启动/请求关闭 Claude。IP 使用标准地址比较，支持 IPv6 的等价写法。
+
+看门狗只恢复已保存的时区和地区格式，**不会跟随新出口改写基准**；安装升级同样保留已有基准，遇到不匹配或旧配置缺少 `exit_ip` 时中止。旧版升级前先退出 Claude，从新版完整目录运行 `claude-switch.ps1 set-region` 确认基准，再执行安装器。未知 IANA 时区会警告并保留当前时区。
+
+非交互调用仅在使用者已经明确确认时传入 `set-region --confirm`；界面会先弹确认框再传入该参数。此参数不跳过 Claude 必须退出的检查。日志为 `region-change.log`（IP 脱敏）及 `region-watchdog.log`。
+
+保镖每轮巡检后等待 10 秒，出口请求最长约 8 秒，因此两次判断间隔可能达到约 18 秒（还可能受系统调度影响）。这是进程级急停，存在检测窗口，不能替代防火墙断网规则；探测请求自身也可能经已变化的网络发送。
 
 ## 多代理客户端支持
 
@@ -53,11 +59,11 @@ TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）
 
 | 项目 | 说明 |
 |---|---|
-| 地区同步 | `region.json` 记录国家、Windows/IANA 时区、culture 与最近更新时间；出口国家切换需连续两次探测一致 |
+| 地区同步 | `region.json` 记录国家、Windows/IANA 时区、culture 与锁定时间；出口 IP/国家只允许使用者主动重新锁定 |
 | 时区名称 | Windows 使用 `Eastern Standard Time` 等 Windows ID；未识别映射时不会回退到美东时区 |
 | 地区看门狗 | `ClaudeRegionWatchdog` 登录启动并每 5 分钟运行，隐藏窗口、最高权限；日志为 `region-watchdog.log` |
-| 保镖频率 | 计划任务登录启动,隐藏窗口常驻,每 10 秒巡检(与 Mac 一致) |
-| 保镖判定 | 显式客户端模式按「客户端进程/服务 + TUN」；`auto` / `other` 只查 TUN |
+| 保镖频率 | 计划任务登录启动,隐藏窗口常驻,每轮巡检后等待 10 秒，另加出口请求耗时 |
+| 保镖判定 | 显式客户端模式按「客户端进程/服务 + TUN」；`auto` / `other` 跳过进程检测；所有模式仍校验固定出口 |
 | IPv6 | 关闭的是物理网卡的 ms_tcpip6 绑定；恢复命令见卸载提示 |
 | SmartScreen | 首次运行可能弹"Windows 已保护你的电脑" → 点「更多信息」→「仍要运行」 |
 | 账号数据目录 | Windows 版在 `%APPDATA%\Claude`(与 macOS 路径不同,逻辑相同) |
@@ -69,9 +75,13 @@ TUN 判定顺序：先看是否存在 `198.18.x.x` 假 IP（Clash 系 fake-ip）
 - 界面是 WPF 重写的第一版,样式以 Mac 版为准对齐,细节可能有出入
 - Clash Verge 的 TUN 开关在 Windows 上如果被更新重置,目前需要手动在设置里重新打开(一键修复会提示)
 - 账号快照切换前请确保 Claude 已完全退出(托盘图标也要退出)
-- 任意安全检查 `fail` 都会阻止启动 Claude；切换归档使用 robocopy 退出码 0–7 成功并做 `.new` / `.previous` 原子替换。遇到待恢复快照时先确认数据，不要直接删除。
-- 界面检查/修复在后台执行；「复制诊断报告」会对 IPv4 脱敏，「打开日志」打开配置目录。保镖关闭 Claude 时会尝试显示 Windows 托盘通知，通知失败会记入 `bodyguard.log`。
+- 安全检查必须包含全部 14 个唯一检查项，`fail`、缺项、重复项、未知状态会阻止启动；`warn`/`info` 供参考。检查本身不改动系统时区/地区设置；修复和看门狗负责恢复。切换归档使用 robocopy 退出码 0–7 成功并做 `.new` / `.previous` 原子替换。遇到待恢复快照时先确认数据，不要直接删除。
+- 界面检查/修复在后台执行；「复制诊断报告」会对 IPv4 脱敏，「打开日志」打开配置目录。保镖关闭请求及原因写入 `bodyguard.log`。
 - **`auto` / `other` 的 TUN 判定是通用启发式**:只要有一块处于 `Up` 状态、描述里带 `TAP/TUN/WireGuard/Wintun/VPN/Tailscale` 的网卡就会判定 TUN 在线,无法区分"代理隧道已接管"还是"某块虚拟网卡只是存在"。可能误判(例如虚拟网卡残留、其他 VPN 适配器),此时请把 `$PROXY_MODE` 改成实际客户端后重跑安装器;若仍不稳定,可在计划任务中暂停 `ClaudeBodyguard`
 - **非 Clash 客户端**:保镖已按客户端模式分派,不再因缺少 `verge-mihomo` 每 10 秒误杀 Claude;`规则置顶` 检查只读 Clash Verge 的 `profiles\Merge.yaml` 与 `clash-verge.yaml`，非 Clash 用户需自行配置 Claude 域名及 STUN 端口规则。`DNS` 检查也按 `198.18.x.x` 判断,使用非 fake-ip TUN 时可能显示 `fail`,不代表代理不可用
 - Windows 版仍为 Beta，未覆盖的 IANA 时区将保留现有时区；`Set-WinSystemLocale` 的系统级设置可能需注销或重启后完全生效。
 - 系统区域为 zh-CN(控制台代码页 936/GBK)时,界面通过读取核心脚本落盘的 `last-check.txt`(UTF-8)展示检查结果,不受代码页影响;若你看到"检测输出不完整(3/14)"且用的是旧版界面,请更新到最新版
+
+## 开发验证
+
+在仓库根目录运行 `powershell -NoProfile -File tests/windows-safety.ps1`（或 `pwsh`）。测试用临时目录、模拟网络/进程/系统设置，不接触真实账号。GitHub Actions 在 Windows PowerShell 5.1 和 PowerShell 7 下运行同一套测试。这里不等于完成 Windows 真机端到端验证。

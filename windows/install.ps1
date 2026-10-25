@@ -61,17 +61,27 @@ if ($country -eq 'CN' -and $FORCE -ne '1') {
     Write-Host "X 当前出口在国内(CN),请先开启代理(TUN模式)并确认节点可用再运行" -ForegroundColor Red
     pause; exit 1
 }
-if (-not $country) {
+if (-not $country -or -not $ip) {
     Write-Host "X 未能识别出口国家,请确认代理已开启后重试" -ForegroundColor Red
     pause; exit 1
 }
-Write-Host "[OK] 出口: $ip ($country)" -ForegroundColor Green
+Write-Host "[OK] 出口: $(Protect-ExitIp $ip) ($country)" -ForegroundColor Green
 if (-not $region.tz_windows) {
     $region.tz_windows = (Get-TimeZone).Id
     Write-Host "[WARN] 未识别到时区映射($($region.tz_iana)),保留当前时区 $($region.tz_windows)" -ForegroundColor Yellow
 }
 New-Item -ItemType Directory -Force -Path $BASE | Out-Null
-Save-RegionInfo $region "$BASE\region.json"
+$regionPath = Join-Path $BASE 'region.json'
+if (Test-Path $regionPath) {
+    try { $savedRegion = Get-Content $regionPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw '现有地区配置无法读取，已停止安装，未覆盖基准' }
+    $match = Test-RegionEgressMatch $region.ip $region.country $savedRegion
+    if (-not $match.passed) { throw "现有基准不匹配：$($match.reason)。请退出 Claude 后使用原安装的 set-region 主动重新锁定；安装器不会覆盖基准。" }
+    $region = $savedRegion
+} else {
+    if (Get-Process -Name 'Claude' -ErrorAction SilentlyContinue) { throw '首次锁定前请先完全退出 Claude' }
+    Save-RegionInfo $region $regionPath
+}
 Write-Host "[OK] 地区目标: $($region.country) / $($region.tz_iana) / $($region.culture)" -ForegroundColor Green
 
 # ---- 2. 自动识别代理组名(仅 Clash Verge) ----

@@ -5,6 +5,7 @@ Add-Type -AssemblyName WindowsBase
 
 $BASE = "$env:USERPROFILE\.claude-switcher"
 $CORE = "$BASE\claude-switch.ps1"
+. (Join-Path $PSScriptRoot 'region-functions.ps1')
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -84,11 +85,11 @@ $xaml = @"
                     </Button.Background>
                 </Button>
                 <Button x:Name="BtnRefresh" Content="重新检查" Padding="18,8" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
-                <Button x:Name="BtnRegion" Content="同步地区" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
+                <Button x:Name="BtnRegion" Content="重新锁定出口" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
                 <Button x:Name="BtnDiagnostic" Content="复制诊断报告" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
                 <Button x:Name="BtnLogs" Content="打开日志" Padding="12,8" Margin="8,0,0,0" FontWeight="Bold" Foreground="White" Background="#1AFFFFFF" BorderThickness="0" Cursor="Hand"/>
             </WrapPanel>
-            <TextBlock Text="任何一项检查不过，都不会启动 Claude" FontSize="10" Foreground="#59FFFFFF" HorizontalAlignment="Center" Margin="0,14,0,0"/>
+            <TextBlock Text="必需检查未通过时阻止启动；警告和信息项供参考" FontSize="10" Foreground="#59FFFFFF" HorizontalAlignment="Center" Margin="0,14,0,0"/>
         </StackPanel>
     </Grid>
 </Window>
@@ -112,9 +113,9 @@ function Update-RegionDisplay {
     if (-not (Test-Path $file)) { $win.FindName('RegionText').Text = '尚未同步'; return }
     try {
         $r = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
-        $when = try { ([datetime]$r.updated_at).ToString('yyyy-MM-dd HH:mm') } catch { '时间未知' }
+        $when = try { ([datetime]$r.locked_at).ToString('yyyy-MM-dd HH:mm') } catch { '时间未知' }
         $win.FindName('RegionText').Text = "$($r.country) / $($r.tz_iana) / $($r.culture) · $when"
-    } catch { $win.FindName('RegionText').Text = '地区配置无法读取，请点击同步地区' }
+    } catch { $win.FindName('RegionText').Text = '地区配置无法读取，请点击重新锁定出口' }
 }
 
 $script:activeJob = $null
@@ -153,7 +154,9 @@ function Start-CoreJob([string]$operation, [string]$target = '') {
         param($corePath,$basePath,$command,$account)
         $argv = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$corePath,$command)
         if ($account) { $argv += $account }
+        if ($command -eq 'set-region') { $argv += '--confirm' }
         if ($command -eq 'checkdetail') {
+            Remove-Item (Join-Path $basePath 'last-check.txt') -Force -ErrorAction SilentlyContinue
             $null = & powershell.exe @argv 2>&1
             Get-Content (Join-Path $basePath 'last-check.txt') -Raw -Encoding UTF8
         } else {
@@ -163,7 +166,8 @@ function Start-CoreJob([string]$operation, [string]$target = '') {
 }
 
 function Finish-Checks([string]$output) {
-    $allOk = $true
+    $report = Test-CheckReport ($output -split "`r?`n")
+    $allOk = $report.passed
     $matched = 0
     $failures = @()
     foreach ($line in ($output -split "`r?`n")) {
@@ -177,11 +181,11 @@ function Finish-Checks([string]$output) {
         if ($st[0] -eq 'fail') {
             $allOk = $false
             $failures += "$($kv[0])：$detail"
-            if ($kv[0] -in @('时区','地区')) { $detail += '；建议点击“同步地区”' }
+            if ($kv[0] -in @('时区','地区')) { $detail += '；建议点击“一键修复”' }
             elseif ($kv[0] -eq '规则置顶') { $detail += '；建议点击“一键修复”' }
         }
-        $icon = if ($st[0] -eq 'ok') { '✓' } elseif ($st[0] -eq 'warn') { '⚠' } else { '✗' }
-        $color = if ($st[0] -eq 'ok') { '#FF22C55E' } elseif ($st[0] -eq 'warn') { '#FFFACC15' } else { '#FFF87171' }
+        $icon = if ($st[0] -eq 'ok') { '✓' } elseif ($st[0] -eq 'warn') { '⚠' } elseif ($st[0] -eq 'info') { 'ℹ' } else { '✗' }
+        $color = if ($st[0] -eq 'ok') { '#FF22C55E' } elseif ($st[0] -eq 'warn') { '#FFFACC15' } elseif ($st[0] -eq 'info') { '#FF60A5FA' } else { '#FFF87171' }
         $rows[$index] = [pscustomobject]@{ Name = $kv[0]; Detail = $detail; Icon = $icon; Color = $color }
         $win.Dispatcher.Invoke([action]{}, 'Render')
     }
@@ -210,6 +214,7 @@ $poller.Add_Tick({
         $action = $script:jobAction
         $target = $script:jobTarget
         $output = (Receive-Job $job | Out-String).Trim()
+        $jobSucceeded = $job.State -eq 'Completed'
         Remove-Job $job -Force -ErrorAction SilentlyContinue
         $script:activeJob = $null
         if ($action -eq 'checkdetail') {
@@ -226,7 +231,7 @@ $poller.Add_Tick({
             }
             Set-ControlsBusy $false
         } elseif ($action -eq 'switch') {
-            if ($output -match 'FAIL:') {
+            if (-not $jobSucceeded -or $output -notmatch '(?m)^(OK:|INFO:当前已是账号)' -or $output -match 'FAIL:') {
                 Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
                 $win.FindName('Banner').Text = $output
                 Set-ControlsBusy $false
@@ -236,7 +241,7 @@ $poller.Add_Tick({
                 Start-CoreJob 'checkdetail'
             }
         } else {
-            if ($output -match 'FAIL:') {
+            if (-not $jobSucceeded -or -not $output -or ($action -eq 'set-region' -and $output -notmatch '(?m)^OK:') -or $output -match 'FAIL:') {
                 Set-Status '操作未完成' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
                 $win.FindName('Banner').Text = $output
                 Set-ControlsBusy $false
@@ -257,7 +262,8 @@ function Copy-DiagnosticReport {
         param($corePath,$basePath)
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $corePath checkdetail 2>$null | Out-Null
         $checks = Get-Content (Join-Path $basePath 'last-check.txt') -Raw -Encoding UTF8
-        $region = Get-Content (Join-Path $basePath 'region.json') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $r = Get-Content (Join-Path $basePath 'region.json') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue | ConvertFrom-Json
+        $region = $r | Select-Object country,tz_iana,tz_windows,culture,locked_at | ConvertTo-Json
         $meta = try { (& curl.exe -s --max-time 6 'https://ipinfo.io/json' 2>$null | ConvertFrom-Json) } catch { $null }
         "检查结果：`n$checks`n地区配置：`n$region`n出口国家/ASN：$($meta.country) / $($meta.org)"
     }
@@ -267,7 +273,10 @@ function Copy-DiagnosticReport {
 
 $win.FindName('BtnRefresh').Add_Click({ Start-CoreJob 'checkdetail' })
 $win.FindName('BtnFix').Add_Click({ Start-CoreJob 'fix' })
-$win.FindName('BtnRegion').Add_Click({ Start-CoreJob 'set-region' })
+$win.FindName('BtnRegion').Add_Click({
+    $answer = [System.Windows.MessageBox]::Show('请先退出 Claude 并确认当前代理出口正确。是否将当前 IP、国家和地区设置保存为新基准？', '重新锁定出口', 'YesNo', 'Warning')
+    if ($answer -eq 'Yes') { Start-CoreJob 'set-region' }
+})
 $win.FindName('BtnA').Add_Click({ Start-CoreJob 'switch' 'A' })
 $win.FindName('BtnB').Add_Click({ Start-CoreJob 'switch' 'B' })
 $win.FindName('BtnDiagnostic').Add_Click({

@@ -36,39 +36,34 @@ function Test-ClientAlive {
     }
 }
 
-$offline = $false
-while ($true) {
+function Get-GuardFailure {
     $tun = Get-TunStatus
-    $clientUp = Test-ClientAlive
-    $alive = $tun.up -and $clientUp
+    if (-not $tun.up -or -not (Test-ClientAlive)) { return '代理内核或 TUN 离线' }
+    try {
+        $region = Get-Content (Join-Path $BASE 'region.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $egress = Get-Egress
+        $match = Test-RegionEgressMatch $egress.ip $egress.loc $region
+        if (-not $match.passed) { return $match.reason }
+    } catch { return '无法读取或验证出口基准' }
+    return ''
+}
 
-    if (-not $alive) {
-        if (-not $offline) {
-            $clientState = if ($PROXY_MODE -eq 'auto' -or $PROXY_MODE -eq 'other') { '跳过(仅TUN)' } elseif ($clientUp) { '在线' } else { '离线' }
-            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(模式=$PROXY_MODE, TUN=$($tun.detail), 客户端=$clientState)" | Out-File -Append -Encoding utf8 $LOG
-            $offline = $true
+$helper = Join-Path $PSScriptRoot 'region-functions.ps1'
+if (-not (Test-Path $helper)) { throw '缺少 region-functions.ps1，请重新安装；保镖未启动' }
+. $helper
+$lastReason = ''
+while ($true) {
+    $reason = Get-GuardFailure
+    if ($reason) {
+        if ($reason -ne $lastReason) {
+            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $reason" | Out-File -Append -Encoding utf8 $LOG
         }
         $p = Get-Process -Name 'Claude' -ErrorAction SilentlyContinue
         if ($p) {
             $p | Stop-Process -Force
-            $message = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 代理离线(内核或TUN丢失),已自动关闭 Claude"
-            $message | Out-File -Append -Encoding utf8 $LOG
-            try {
-                Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-                $notify = New-Object System.Windows.Forms.NotifyIcon -ErrorAction Stop
-                $notify.Icon = [System.Drawing.SystemIcons]::Warning
-                $notify.Visible = $true
-                $notify.BalloonTipTitle = 'Claude 已安全关闭'
-                $notify.BalloonTipText = '代理隧道离线，已自动关闭 Claude。请检查代理后再启动。'
-                $notify.ShowBalloonTip(5000)
-                Start-Sleep -Seconds 2
-                $notify.Dispose()
-            } catch {
-                "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 托盘通知失败: $($_.Exception.Message)" | Out-File -Append -Encoding utf8 $LOG
-            }
+            "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 已请求关闭 Claude: $reason" | Out-File -Append -Encoding utf8 $LOG
         }
-    } else {
-        $offline = $false
     }
+    $lastReason = $reason
     Start-Sleep -Seconds 10
 }
