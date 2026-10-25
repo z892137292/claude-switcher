@@ -124,9 +124,13 @@ try {
         }
         # The caller gets UTF-8 text through a file even on a legacy code page.
         $stub=Join-Path $sandbox "stub 中文's.ps1"
-        "'FAIL:未找到 Claude Code，请先安装'" | Set-Content $stub -Encoding UTF8
+        $bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
+        [IO.File]::WriteAllText($stub, "'FAIL:未找到 Claude Code，请先安装'", $bom)
         $text=Invoke-CoreUtf8 $stub $BASE 'switch' 'A'
         Assert ($text.Trim() -eq 'FAIL:未找到 Claude Code，请先安装') 'Chinese error was corrupted by native stdout decoding'
+        [IO.File]::WriteAllText($stub, "'FAIL:中文错误后退出'`nexit 1", $bom)
+        $text=Invoke-CoreUtf8 $stub $BASE 'switch' 'B'
+        Assert ($text.Trim() -eq 'FAIL:中文错误后退出') 'Failed core exit lost its UTF-8 result'
         Assert (@(Get-ChildItem $BASE -Filter 'operation-*.txt').Count -eq 0) 'UTF-8 result temp file leaked'
     }
     Write-Host "PASS: $passed Claude Code assertions"
