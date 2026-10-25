@@ -53,3 +53,19 @@ powershell -NoProfile -File tests/windows-code.ps1
 ```
 
 GitHub Actions 分别用 Windows PowerShell 5.1 和 PowerShell 7 跑隔离测试。Code 测试使用临时目录和假 CLI，验证 A/B 配置、项目路径、中文结果、进程树与 PID 复用保护，不接触真实账号或代理。真实 Code 登录、代理中断和 WPF 仍需真机验收。
+
+## UDP/STUN 诊断
+
+WebRTC 行实际运行独立的 IPv4 UDP STUN 探针，不是浏览器 ICE 测试，也不能覆盖所有 IPv6 或浏览器特有行为。
+
+每个服务器设置 DNS 等待 1.5 秒、网络阶段共 4 秒；同一套接字/事务最多发送两次。四个服务器顺序执行，全部超时可能约 22 秒，另加调度/处理时间。报文校验包含 Binding 响应类型、magic cookie、事务 ID、消息长度和属性边界，支持 MAPPED/XOR-MAPPED 地址解析。仅所有服务器返回有效且一致的出口时显示绿色；部分失败保持黄色，发现不同出口时显示红色并要求核实路由，不直接断言一定是本地真实 IP 泄漏。
+
+点击「复制诊断报告」会附上 STUN 明细；或「打开日志」查看 `stun-diagnostics.txt`。文件含生成时间、公开服务器名称、状态、发送/接收字节、尝试次数、无效报文数和耗时；映射 IP 脱敏，不记录原始报文或凭据。
+
+- `timeout`：发送后截止期限内没有收到数据报。
+- `invalid_response`：收到了数据，但报文无效或事务不匹配；具体原因在 detail。
+- `dns_error` / `dns_timeout` / `dns_no_ipv4`：发送前的名称解析阶段失败。
+- `send_error` / `receive_error`：套接字收发错误，detail 给出错误类别。
+- `stun_error`：服务端返回 STUN 错误码。
+
+测试：`powershell -NoProfile -File tests/windows-stun.ps1`。使用合成报文和本机 UDP 回环，不连接公共 STUN 或修改代理。不要为了测试变绿而改为直连或关闭防火墙。

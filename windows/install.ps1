@@ -112,6 +112,7 @@ Copy-Item "$PSScriptRoot\claude-region-watchdog.ps1" "$BASE\claude-region-watchd
 Copy-Item "$PSScriptRoot\region-functions.ps1" "$BASE\region-functions.ps1" -Force
 Copy-Item "$PSScriptRoot\code-functions.ps1" "$BASE\code-functions.ps1" -Force
 Copy-Item "$PSScriptRoot\code-session.ps1" "$BASE\code-session.ps1" -Force
+Copy-Item "$PSScriptRoot\stun-functions.ps1" "$BASE\stun-functions.ps1" -Force
 $launch = Get-LaunchSettings
 $launch | Add-Member -NotePropertyName mode -NotePropertyValue 'code' -Force
 Save-LaunchSettings $launch

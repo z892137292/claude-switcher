@@ -96,7 +96,7 @@ jobs:
           Invoke-ps2exe -inputFile 'windows\SwitcherUI.ps1' -outputFile "$dist\Claude-Switcher.exe" -noConsole -STA -x64 -title 'Claude Switcher' -version '1.0.0.0'
           if (-not (Test-Path "$dist\Claude-Switcher.exe")) { throw 'EXE build failed' }
 
-          foreach ($f in 'install.ps1','install.bat','uninstall.ps1','uninstall.bat','claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','claude-region-watchdog.ps1','region-functions.ps1','code-functions.ps1','code-session.ps1','README.md') {
+          foreach ($f in 'install.ps1','install.bat','uninstall.ps1','uninstall.bat','claude-switch.ps1','SwitcherUI.ps1','claude-bodyguard.ps1','claude-region-watchdog.ps1','region-functions.ps1','code-functions.ps1','code-session.ps1','stun-functions.ps1','README.md') {
             Copy-Item "windows\$f" $dist -Force
           }
 

@@ -188,8 +188,13 @@ function Finish-Checks([string]$output) {
     }
     $script:allChecksOk = ($matched -eq $checkNames.Count -and $allOk)
     if ($script:allChecksOk) {
-        Set-Status '环境安全' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
-        $win.FindName('Banner').Text = ''
+        if ($output -match '(?m)^[^=]+=warn:') {
+            Set-Status '有未确认项' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
+            $win.FindName('Banner').Text = '部分检查尚未确认，请查看黄色条目；当前策略允许启动。'
+        } else {
+            Set-Status '检查通过' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
+            $win.FindName('Banner').Text = ''
+        }
     } else {
         Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))
         $win.FindName('Banner').Text = if ($failures.Count) { "未通过：$($failures -join '；')" } else { "检测输出不完整($matched/$($checkNames.Count))，请重新检查" }
@@ -264,7 +269,8 @@ function Copy-DiagnosticReport {
         $r = Get-Content (Join-Path $basePath 'region.json') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue | ConvertFrom-Json
         $region = $r | Select-Object country,tz_iana,tz_windows,culture,locked_at | ConvertTo-Json
         $meta = try { (& curl.exe -s --max-time 6 'https://ipinfo.io/json' 2>$null | ConvertFrom-Json) } catch { $null }
-        "检查结果：`n$checks`n地区配置：`n$region`n出口国家/ASN：$($meta.country) / $($meta.org)"
+        $stun=Get-Content (Join-Path $basePath 'stun-diagnostics.txt') -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        "检查结果：`n$checks`n地区配置：`n$region`n出口国家/ASN：$($meta.country) / $($meta.org)`nSTUN诊断：`n$stun"
     }
     $script:jobAction = 'diagnostic'
     Set-Status '生成报告中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))

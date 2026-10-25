@@ -16,6 +16,7 @@ $LOG  = Join-Path $BASE "claude-switch.log"
 $REGION_FILE = Join-Path $BASE "region.json"
 . (Join-Path $PSScriptRoot "region-functions.ps1")
 . (Join-Path $PSScriptRoot "code-functions.ps1")
+. (Join-Path $PSScriptRoot "stun-functions.ps1")
 $CLASH_DIR = @(
     (Join-Path $env:APPDATA "io.github.clash-verge-rev.clash-verge-rev"),
     (Join-Path $env:LOCALAPPDATA "io.github.clash-verge-rev.clash-verge-rev")
@@ -74,48 +75,17 @@ function Test-TunUp {
     return [bool]$t.up
 }
 
-# STUN 探针(纯 .NET UDP,手工构造 RFC5389 报文)
-function Get-StunPublicIP([string]$server, [int]$port, [int]$timeoutMs = 2000) {
-    try { $addr = ([System.Net.Dns]::GetHostAddresses($server) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1) } catch { return $null }
-    if (-not $addr) { return $null }
-    $udp = New-Object System.Net.Sockets.UdpClient
-    $udp.Client.ReceiveTimeout = $timeoutMs
-    try {
-        $txn = New-Object byte[] 12; (New-Object Random).NextBytes($txn)
-        $req = [byte[]](0x00, 0x01, 0x00, 0x00) + [byte[]](0x21, 0x12, 0xA4, 0x42) + $txn
-        $udp.Connect($addr, $port)
-        [void]$udp.Send($req, $req.Length)
-        $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
-        $resp = $udp.Receive([ref]$remote)
-        $pos = 20
-        while ($pos + 4 -le $resp.Length) {
-            $atype = ([int]$resp[$pos] -shl 8) -bor $resp[$pos + 1]
-            $alen  = ([int]$resp[$pos + 2] -shl 8) -bor $resp[$pos + 3]
-            if (($atype -eq 0x20 -or $atype -eq 0x01) -and $alen -ge 8 -and $resp[$pos + 5] -eq 0x01) {
-                $ipBytes = @($resp[$pos + 8], $resp[$pos + 9], $resp[$pos + 10], $resp[$pos + 11])
-                if ($atype -eq 0x20) {
-                    $cookie = [byte[]](0x21, 0x12, 0xA4, 0x42)
-                    for ($i = 0; $i -lt 4; $i++) { $ipBytes[$i] = $ipBytes[$i] -bxor $cookie[$i] }
-                }
-                return ($ipBytes -join '.')
-            }
-            $pos += 4 + $alen + ((4 - ($alen % 4)) % 4)
-        }
-    } catch { return $null } finally { $udp.Close() }
-    return $null
-}
-
+# IPv4 UDP STUN diagnostics; a browser's ICE behavior is outside this test.
 function Test-WebRTC($exitIp) {
-    $servers = @(@("stun.miwifi.com", 3478), @("stun.chat.bilibili.com", 3478), @("stun.l.google.com", 19302), @("stun.cloudflare.com", 3478))
-    $found = @()
-    foreach ($s in $servers) {
-        $r = Get-StunPublicIP $s[0] $s[1]
-        if ($r -and ($found -notcontains $r)) { $found += $r }
-    }
-    if ($found.Count -eq 0) { return @{ code = 'warn'; detail = 'STUN无响应，未观察到候选地址，无法证明UDP无泄漏' } }
-    $leak = $found | Where-Object { $_ -ne $exitIp }
-    if ($leak) { return @{ code = 'fail'; detail = "暴露非代理IP: $(($leak | ForEach-Object { Protect-ExitIp $_ }) -join ',')" } }
-    return @{ code = 'ok'; detail = '仅暴露代理IP' }
+    $servers=@(@('stun.miwifi.com',3478),@('stun.chat.bilibili.com',3478),@('stun.l.google.com',19302),@('stun.cloudflare.com',3478))
+    $results=@(foreach ($server in $servers) { Invoke-StunProbe $server[0] $server[1] })
+    $assessment=Get-StunAssessment $results $exitIp
+    try {
+        $lines=@("generated_at=$((Get-Date).ToUniversalTime().ToString('o'))",'UDP STUN diagnostics (not browser WebRTC); IPv4 transport; DNS <=1500ms + network <=4000ms/server; 2 sends maximum.')
+        $lines+=@(Format-StunDiagnostics $results)
+        $lines | Out-File -LiteralPath (Join-Path $BASE 'stun-diagnostics.txt') -Encoding UTF8 -ErrorAction Stop
+    } catch { $assessment.detail+='；诊断文件写入失败' }
+    return $assessment
 }
 
 function Test-RulesPinned {
@@ -521,6 +491,7 @@ function Invoke-Switch($target) {
 
 switch ($args[0]) {
     'checkdetail' {
+        Remove-Item -LiteralPath (Join-Path $BASE 'stun-diagnostics.txt') -Force -ErrorAction SilentlyContinue
         $r = Invoke-CheckDetail
         $r | Out-File -Encoding utf8 "$BASE\last-check.txt"
         $r

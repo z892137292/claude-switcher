@@ -23,3 +23,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & '${{ matrix.shell }}' -NoLogo -NoProfile -File ./tests/windows-code.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & '${{ matrix.shell }}' -NoLogo -NoProfile -File ./tests/windows-stun.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
