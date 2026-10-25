@@ -116,6 +116,7 @@ New-Item -ItemType Directory -Force -Path $BASE | Out-Null
 Copy-Item "$PSScriptRoot\claude-switch.ps1"   "$BASE\claude-switch.ps1" -Force
 Copy-Item "$PSScriptRoot\SwitcherUI.ps1"      "$BASE\SwitcherUI.ps1" -Force
 Copy-Item "$PSScriptRoot\claude-bodyguard.ps1" "$BASE\claude-bodyguard.ps1" -Force
+Copy-Item "$PSScriptRoot\uninstall.ps1" "$BASE\uninstall.ps1" -Force -ErrorAction SilentlyContinue
 
 # 写入探测到的客户端模式/代理组名/国家/时区(替换串里的 $ 用 $$ 转义,避免被当作捕获组)
 $core = Get-Content "$BASE\claude-switch.ps1" -Raw
