@@ -12,14 +12,19 @@ $PROXY_MODE = if (Test-Path $modeFile) { Get-Content $modeFile -Raw } else { '' 
 if ($PROXY_MODE) { $PROXY_MODE = $PROXY_MODE.Trim() }
 if (-not $PROXY_MODE) { $PROXY_MODE = 'clash-verge' }
 
-# TUN 在线判定:198.18 假IP段优先,否则回退到任意 Up 状态的虚拟网卡(兼容 Astrill/WireGuard/OpenVPN 等)
+# TUN 设备状态：地址必须属于同一张 Up 网卡；流量路径另行验证。
 function Get-TunStatus {
-    if (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' }) {
-        return @{ up = $true; detail = '198.18 假IP段' }
+    $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.AddressState -eq 'Preferred' })
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')
+    foreach ($nic in $adapters) {
+        $assigned = @($addresses | Where-Object InterfaceIndex -eq $nic.ifIndex)
+        $fake = @($assigned | Where-Object IPAddress -like '198.18.*')
+        if ($assigned.Count -gt 0 -and ($fake.Count -gt 0 -or $nic.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale')) {
+            return @{ up = $true; detail = "$($nic.Name) Up；已分配IPv4（不代表流量已走隧道）" }
+        }
     }
-    $nic = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale') }
-    if ($nic) { return @{ up = $true; detail = '通用虚拟网卡' } }
-    return @{ up = $false; detail = '不在线' }
+    return @{ up = $false; detail = '未找到同时具备 Up 状态和有效IPv4的隧道网卡' }
 }
 
 # 客户端进程/服务在线判定:auto 与 other 只依赖 TUN,不要求特定进程(避免误杀)

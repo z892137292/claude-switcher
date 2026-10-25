@@ -140,6 +140,7 @@ function Start-CoreJob([string]$operation, [string]$target = '') {
     $script:jobTarget = $target
     Set-ControlsBusy $true
     if ($operation -eq 'checkdetail') {
+        $script:allChecksOk = $false
         $rows.Clear()
         foreach ($n in $checkNames) { $rows.Add([pscustomobject]@{ Name = $n; Detail = ''; Icon = '…'; Color = '#FF6B7280' }) }
         Set-Status '检查中' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
@@ -192,8 +193,8 @@ function Finish-Checks([string]$output) {
             Set-Status '有未确认项' ([System.Windows.Media.Color]::FromRgb(0xFB,0x92,0x3C))
             $win.FindName('Banner').Text = '部分检查尚未确认，请查看黄色条目；当前策略允许启动。'
         } else {
-            Set-Status '检查通过' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
-            $win.FindName('Banner').Text = ''
+            Set-Status '启动条件通过' ([System.Windows.Media.Color]::FromRgb(0x22,0xC5,0x5E))
+            $win.FindName('Banner').Text = '结果仅代表本次检查；蓝色条目为信息，不代表已验证。'
         }
     } else {
         Set-Status '检查未过' ([System.Windows.Media.Color]::FromRgb(0xF8,0x71,0x71))

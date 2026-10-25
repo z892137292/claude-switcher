@@ -195,6 +195,19 @@ try {
     $beforeSession=Get-Content (Join-Path $DATA 'session') -Raw
     $output=Invoke-Switch A
     Assert ($output -match 'FAIL:' -and (Get-Content (Join-Path $DATA 'session') -Raw) -eq $beforeSession) 'Failed archive destroyed active data'
+    # Residual Fake-IP addresses must not make a stopped or unrelated adapter pass.
+    foreach ($source in @('windows/claude-switch.ps1','windows/claude-bodyguard.ps1')) {
+        Import-TestFunction $source 'Get-TunStatus'
+        function Get-NetIPAddress { return [pscustomobject]@{IPAddress='198.18.0.1';InterfaceIndex=25;AddressState='Preferred'} }
+        function Get-NetAdapter { return [pscustomobject]@{ifIndex=25;Name='Mihomo';Status='Disconnected';InterfaceDescription='Meta Tunnel'} }
+        Assert (-not (Get-TunStatus).up) 'Residual address on disconnected adapter passed'
+        function Get-NetAdapter { return [pscustomobject]@{ifIndex=26;Name='Other';Status='Up';InterfaceDescription='Meta Tunnel'} }
+        Assert (-not (Get-TunStatus).up) 'Address belonging to another adapter passed'
+        function Get-NetAdapter { return [pscustomobject]@{ifIndex=25;Name='Mihomo';Status='Up';InterfaceDescription='Meta Tunnel'} }
+        Assert ((Get-TunStatus).up) 'Active tunnel with preferred address rejected'
+        function Get-NetIPAddress { return [pscustomobject]@{IPAddress='198.18.0.1';InterfaceIndex=25;AddressState='Tentative'} }
+        Assert (-not (Get-TunStatus).up) 'Tentative tunnel address passed'
+    }
     Write-Host "PASS: $script:passed Windows safety assertions"
 } finally {
     $env:USERPROFILE=$originalProfile

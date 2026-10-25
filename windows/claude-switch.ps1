@@ -61,14 +61,19 @@ function Test-ProxyAlive {
     }
 }
 
-# TUN 在线判定:198.18 假IP段优先,否则回退到任意 Up 状态的虚拟网卡(兼容 Astrill/WireGuard/OpenVPN 等)
+# TUN 设备状态：地址必须属于同一张 Up 网卡；流量路径另行验证。
 function Get-TunStatus {
-    if (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '198.18.*' }) {
-        return @{ up = $true; detail = '198.18 假IP段' }
+    $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.AddressState -eq 'Preferred' })
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up')
+    foreach ($nic in $adapters) {
+        $assigned = @($addresses | Where-Object InterfaceIndex -eq $nic.ifIndex)
+        $fake = @($assigned | Where-Object IPAddress -like '198.18.*')
+        if ($assigned.Count -gt 0 -and ($fake.Count -gt 0 -or $nic.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale')) {
+            return @{ up = $true; detail = "$($nic.Name) Up；已分配IPv4（不代表流量已走隧道）" }
+        }
     }
-    $nic = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'TAP|TUN|WireGuard|Wintun|VPN|Tailscale') }
-    if ($nic) { return @{ up = $true; detail = '通用虚拟网卡' } }
-    return @{ up = $false; detail = '不在线' }
+    return @{ up = $false; detail = '未找到同时具备 Up 状态和有效IPv4的隧道网卡' }
 }
 function Test-TunUp {
     $t = Get-TunStatus
@@ -156,21 +161,27 @@ Apply-RegionSystemSettings `$r
 function Invoke-CheckDetail {
     $pname = Get-ProxyName
     if (Test-ProxyAlive) {
-        if ($PROXY_MODE -eq 'other') { "代理内核=ok:$pname(仅校验TUN)" }
-        else { "代理内核=ok:$pname 运行中" }
+        if ($PROXY_MODE -eq 'other') { "代理内核=info:$pname 未识别内核；另行检查TUN和连通性" }
+        elseif ($PROXY_MODE -eq 'clash-verge') {
+            $gui = @(Get-Process -Name 'clash-verge' -ErrorAction SilentlyContinue)
+            if (@($gui | Where-Object { -not $_.Responding }).Count -gt 0) {
+                "代理内核=warn:Mihomo进程存在；Clash界面未响应，连通性另验"
+            } elseif ($gui.Count -eq 0) {
+                "代理内核=info:Mihomo进程存在；Clash界面未运行，连通性另验"
+            } else { "代理内核=info:Mihomo进程存在；Clash界面响应，连通性另验" }
+        } else { "代理内核=info:$pname 进程或服务存在；连通性另验" }
     } else { "代理内核=fail:$pname 未运行" }
 
     $tun = Get-TunStatus
     if ($tun.up) {
-        if ($tun.detail -eq '198.18 假IP段') { "TUN网卡=ok" }
-        else { "TUN网卡=ok:$($tun.detail)" }
-    } else { "TUN网卡=fail:不在线" }
+        "TUN网卡=ok:$($tun.detail)"
+    } else { "TUN网卡=fail:$($tun.detail)" }
 
     $e = Get-Egress
     $region = if (Test-Path $REGION_FILE) { try { Get-Content $REGION_FILE -Raw | ConvertFrom-Json } catch { $null } } else { $null }
     $targetCountry = if ($region.country) { ([string]$region.country).ToUpperInvariant() } else { '' }
     if (-not $region -or -not $e.ip -or -not $e.loc) { "出口IP=fail:无法获取出口IP/国家或缺少锁定基准" }
-    elseif ($e.loc -eq $targetCountry) { "出口IP=ok:国家 $($e.loc)" }
+    elseif ($e.loc -eq $targetCountry) { "出口IP=ok:$(Protect-ExitIp $e.ip) / $($e.loc)（本次实测）" }
     else { "出口IP=fail:当前国家 $($e.loc)，期望 $targetCountry" }
 
     $egressMatch = Test-RegionEgressMatch $e.ip $e.loc $region
@@ -189,18 +200,18 @@ function Invoke-CheckDetail {
     if (-not $v6off) { "IPv6=ok:已关闭" } else { "IPv6=fail:未关闭" }
 
     $dns = (Resolve-DnsName claude.ai -Type A -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-    if ($dns -like '198.18.*') { "DNS=ok:走隧道" } else { "DNS=fail:未走隧道($dns)" }
+    if ($dns -like '198.18.*') { "DNS=info:返回Fake-IP；不能单独证明DNS走隧道" } else { "DNS=fail:未走隧道($dns)" }
 
     $w = Test-WebRTC $e.ip
     "WebRTC=$($w.code):$($w.detail)"
 
     $bg = Get-ScheduledTask -TaskName 'ClaudeBodyguard' -ErrorAction SilentlyContinue
-    if ($bg -and $bg.State -eq 'Running') { "保镖=ok:运行中" } else { "保镖=fail:未运行，请修复或重新安装" }
+    if ($bg -and $bg.State -eq 'Running') { "保镖=ok:计划任务运行中（不代表本轮巡检成功）" } else { "保镖=fail:未运行，请修复或重新安装" }
 
-    if (Test-RulesPinned) { "规则置顶=ok:所需规则已配置(静态检查)" } else { "规则置顶=fail:未生效" }
+    if (Test-RulesPinned) { "规则置顶=info:配置文件包含规则；未验证内核运行规则" } else { "规则置顶=fail:配置文件缺少所需规则" }
 
     # 客户端语言: Windows 端 Claude 跟随系统区域格式,地区检查已覆盖
-    "客户端语言=ok:跟随系统"
+    "客户端语言=info:跟随系统的配置约定；未读取Code实际语言"
 
     $asn = if ($region.asn) { [string]$region.asn } else { '未记录' }
     "ASN属性=info:$asn (仅记录，不阻断)"
