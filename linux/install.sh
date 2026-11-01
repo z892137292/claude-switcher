@@ -118,7 +118,7 @@ mkdir -p "$BASE"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$DIR/claude-switch.sh" "$BASE/"
 cp "$DIR/claude-bodyguard.sh" "$BASE/"
-cp "$DIR/stun-probe.py" "$BASE/"
+cp "$DIR/stun-probe.py" "$DIR/mihomo-chain-check.py" "$BASE/"
 chmod +x "$BASE/claude-switch.sh" "$BASE/claude-bodyguard.sh"
 sed -i \
     -e "s|^PROXY_MODE=\".*\"|PROXY_MODE=\"$MODE\"|" \
