@@ -8,6 +8,7 @@
 #   harden-controller [配置]    external-controller 改为仅本机监听,并安全重启 mihomo
 #   cleanup <用户>              删除该用户目录下的旧配置副本
 #   rollback <用户>             回滚到用户态保镖
+#   menu                       终端菜单面板(无参数时默认进入)
 set -u
 umask 022
 CONF=/etc/claude-switcher
@@ -148,8 +149,39 @@ cmd_cleanup() {
 
 cmd_rollback() { need_root; bash "$DIR/install-root-bodyguard.sh" --rollback "${1:?用法: rollback <用户>}"; }
 
+# 子命令含 exit,放进子 shell 执行,避免退出整个菜单
+cmd_menu() {
+    need_root
+    local def_user="${SUDO_USER:-claude}" n u m
+    while true; do
+        echo; echo "===== Claude 保镖面板 ====="
+        echo " 1) 状态体检        2) 同步 mihomo API 配置"
+        echo " 3) 更新出口白名单  4) 安装/更新 root 保镖"
+        echo " 5) API 改仅本机监听 6) 清理旧配置副本"
+        echo " 7) 回滚用户态保镖  8) 查看保镖日志"
+        echo " 9) 环境预检(checkdetail)   0) 退出"
+        read -r -p "选择: " n
+        case "$n" in
+            1) (cmd_status) ;;
+            2) read -r -p "mihomo 配置路径 [$MIHOMO_CFG_DEFAULT]: " u; (cmd_sync "${u:-$MIHOMO_CFG_DEFAULT}") ;;
+            3) (cmd_set_egress) ;;
+            4) read -r -p "代理模式 [mihomo]: " m; read -r -p "运行用户 [$def_user]: " u
+               (cmd_install "${m:-mihomo}" "${u:-$def_user}") ;;
+            5) (cmd_harden_controller) ;;
+            6) read -r -p "用户 [$def_user]: " u; (cmd_cleanup "${u:-$def_user}") ;;
+            7) read -r -p "用户 [$def_user]: " u; (cmd_rollback "${u:-$def_user}") ;;
+            8) tail -n 20 "$CONF/bodyguard.log" 2>/dev/null || echo "  无触发记录" ;;
+            9) bash "$DIR/claude-switch.sh" checkdetail ;;
+            0|q|"") return 0 ;;
+            *) echo "无效选择" ;;
+        esac
+    done
+}
+
 c="${1:-}"; shift || true
+[ -z "$c" ] && [ -t 0 ] && c=menu
 case "$c" in
+    menu) cmd_menu ;;
     status) cmd_status ;;
     sync) cmd_sync "$@" ;;
     set-egress) cmd_set_egress ;;
