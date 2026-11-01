@@ -195,7 +195,9 @@ checkdetail() {
     esac
 
     # 10. 保镖
-    if systemctl --user is-active claude-bodyguard.service >/dev/null 2>&1; then
+    if systemctl is-active claude-bodyguard-root.service >/dev/null 2>&1; then
+        echo "保镖=ok:root 服务运行中"
+    elif systemctl --user is-active claude-bodyguard.service >/dev/null 2>&1; then
         lastkill=$(tail -1 "$BASE/bodyguard.log" 2>/dev/null | cut -c1-40)
         echo "保镖=ok:${lastkill:-待命}"
     else
@@ -381,7 +383,9 @@ fix() {
     command -v systemd-resolve >/dev/null 2>&1 && systemd-resolve --flush-caches 2>/dev/null
 
     # C. 保镖(systemd user 服务,免 sudo)
-    if ! systemctl --user is-active claude-bodyguard.service >/dev/null 2>&1; then
+    if systemctl is-active claude-bodyguard-root.service >/dev/null 2>&1; then
+        echo "FIX:保镖 ✓ (root 服务,跳过用户态注册)"
+    elif ! systemctl --user is-active claude-bodyguard.service >/dev/null 2>&1; then
         echo "FIX:注册并启动保镖服务..."
         mkdir -p "$HOME/.config/systemd/user"
         cat > "$HOME/.config/systemd/user/claude-bodyguard.service" <<EOF
