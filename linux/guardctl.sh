@@ -89,7 +89,7 @@ cmd_status() {
     echo "  claude 进程数: $(pgrep -x claude | wc -l)"
     [ -f "$CONF/bodyguard.log" ] && { echo "  最近触发记录:"; tail -3 "$CONF/bodyguard.log" | sed 's/^/    /'; } || echo "  无触发记录"
     echo ""
-    [ "$FAIL" -eq 0 ] && echo "总体: 正常" || { echo "总体: 有异常(见 ✗)"; return 1; }
+    if [ "$FAIL" -eq 0 ]; then echo "总体: 正常"; else echo "总体: 有异常(见 ✗)"; return 1; fi
 }
 
 cmd_install() {
