@@ -5,7 +5,7 @@
 密钥: ~/.claude-switcher/mihomo-secret (仅文件读取,不进命令行/日志)"""
 import json, os, sys, urllib.request
 
-BASE = os.path.expanduser("~/.claude-switcher")
+BASE = os.environ.get("CLAUDE_SWITCHER_DIR") or os.path.expanduser("~/.claude-switcher")
 KEYS = ("claude", "anthropic")
 
 
