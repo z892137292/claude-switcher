@@ -15,6 +15,9 @@ ALLOW="$CONF/egress-allow"
 CHAIN="$(dirname "$0")/mihomo-chain-check.py"
 SECRET="$CONF/mihomo-secret"
 tick=0; miss=0; amiss=0
+# 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),连续 UNLOCK_AFTER 轮正常才解除
+UNLOCK_AFTER=3
+lock=0; good=0; egress_bad=0; egress_reason=""
 
 while true; do
     ok=1; reason=""
@@ -38,22 +41,44 @@ while true; do
         cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
-            [ "$miss" -ge 2 ] && ok=0 && reason="出口探测连续失败"
+            [ "$miss" -ge 2 ] && { egress_bad=1; egress_reason="出口探测连续失败"; }
         else
             miss=0
-            tr -d '\r' < "$ALLOW" | grep -qxF "$cur" || { ok=0; reason="出口IP不在白名单"; }
+            if tr -d '\r' < "$ALLOW" | grep -qxF "$cur"; then egress_bad=0; else egress_bad=1; egress_reason="出口IP不在白名单"; fi
         fi
+    else
+        [ -s "$ALLOW" ] || egress_bad=0
     fi
+    [ "$egress_bad" -eq 1 ] && { ok=0; reason="$egress_reason"; }
     if [ -s "$SECRET" ] && [ -f "$CHAIN" ]; then
         python3 "$CHAIN" >/dev/null 2>&1; rc=$?
         if [ "$rc" -eq 1 ]; then ok=0; reason="claude 连接绕过代理(DIRECT)"; amiss=0
         elif [ "$rc" -eq 2 ]; then amiss=$((amiss + 1)); [ "$amiss" -ge 2 ] && ok=0 && reason="mihomo API 不可用"
         else amiss=0; fi
     fi
-    if [ "$ok" -eq 0 ] && pgrep -x claude >/dev/null 2>&1; then
-        pkill -x claude
-        echo "$(date '+%Y-%m-%d %H:%M:%S') ${reason:-代理离线(内核或TUN丢失)},已自动关闭 claude CLI" >>"$LOG"
+    ts() { date '+%Y-%m-%d %H:%M:%S'; }
+    if [ "$ok" -eq 0 ]; then
+        good=0
+        if [ "$lock" -eq 0 ]; then
+            lock=1
+            echo "$(ts) 进入锁定: ${reason:-代理离线(内核或TUN丢失)}" >>"$LOG"
+        fi
+    elif [ "$lock" -eq 1 ]; then
+        good=$((good + 1))
+        if [ "$good" -ge "$UNLOCK_AFTER" ]; then
+            lock=0; good=0
+            echo "$(ts) 解除锁定(连续 ${UNLOCK_AFTER} 轮正常)" >>"$LOG"
+        fi
+    fi
+    if [ "$lock" -eq 1 ]; then
+        if pgrep -x claude >/dev/null 2>&1; then
+            pkill -x claude
+            echo "$(ts) 锁定中,已关闭 claude CLI" >>"$LOG"
+        fi
+        for _ in 1 2 3 4 5; do sleep 0.5; pkill -x claude >/dev/null 2>&1; done
+        sleep 0.5
+    else
+        sleep 3
     fi
     tick=$((tick + 1))
-    sleep 3
 done
