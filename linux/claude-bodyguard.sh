@@ -11,7 +11,7 @@ ALLOW="$HOME/.claude-switcher/egress-allow"
 # 可选: 存在 mihomo-secret 时,通过 mihomo API 检查 claude/anthropic 连接是否走 DIRECT(无需写死节点 IP)
 CHAIN="$(dirname "$0")/mihomo-chain-check.py"
 SECRET="$HOME/.claude-switcher/mihomo-secret"
-miss=0; amiss=0
+tick=0; miss=0; amiss=0
 
 while true; do
     ok=1; reason=""
@@ -31,7 +31,7 @@ while true; do
         other|auto)  : ;;  # other/auto 只查虚拟网卡(启发式,避免误杀)
         *)           pgrep -f 'verge-mihomo|mihomo' >/dev/null 2>&1 || ok=0 ;;
     esac
-    if [ -s "$ALLOW" ]; then
+    if [ -s "$ALLOW" ] && [ $((tick % 10)) -eq 0 ]; then
         cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
@@ -51,5 +51,6 @@ while true; do
         pkill -x claude
         echo "$(date '+%Y-%m-%d %H:%M:%S') ${reason:-代理离线(内核或TUN丢失)},已自动关闭 claude CLI" >>"$LOG"
     fi
+    tick=$((tick + 1))
     sleep 3
 done
