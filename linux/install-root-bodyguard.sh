@@ -4,6 +4,7 @@
 #   例: sudo bash install-root-bodyguard.sh mihomo claude
 # 回滚: sudo bash install-root-bodyguard.sh --rollback <claude-user>
 set -e
+umask 022
 [ "$(id -u)" -eq 0 ] || { echo "X 需要 root(sudo)"; exit 1; }
 
 LIB=/usr/local/lib/claude-switcher
@@ -29,8 +30,11 @@ UH=$(getent passwd "$U" | cut -d: -f6)
 # 脚本放 root 目录,配置放 /etc,均 root 所有,claude 用户不可写
 install -d -m 755 -o root -g root "$LIB"
 install -d -m 700 -o root -g root "$CONF"
-sed "s|__PROXY_MODE__|$MODE|g" "$DIR/claude-bodyguard.sh" > "$LIB/claude-bodyguard.sh"
-install -m 755 -o root -g root "$LIB/claude-bodyguard.sh" "$LIB/claude-bodyguard.sh"
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+sed "s|__PROXY_MODE__|$MODE|g" "$DIR/claude-bodyguard.sh" > "$TMP"
+bash -n "$TMP"
+install -m 755 -o root -g root "$TMP" "$LIB/claude-bodyguard.sh"
 install -m 755 -o root -g root "$DIR/mihomo-chain-check.py" "$LIB/mihomo-chain-check.py"
 bash -n "$LIB/claude-bodyguard.sh"
 
