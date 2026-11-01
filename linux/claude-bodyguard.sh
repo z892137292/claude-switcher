@@ -3,15 +3,18 @@
 # 说明: Linux 上 Claude 使用形态是 网页版(浏览器) + Claude Code CLI。
 # 保镖只终止 claude CLI(掉了不会误伤你正在用的浏览器)。
 # 安装器会把 __PROXY_MODE__ 替换为安装时识别的客户端;未替换(旧装)时按 Clash 内核判定,行为与旧版一致
-LOG="$HOME/.claude-switcher/bodyguard.log"
+# root 系统服务模式下由 CLAUDE_SWITCHER_DIR 指向 root 所有的配置目录
+CONF="${CLAUDE_SWITCHER_DIR:-$HOME/.claude-switcher}"
+export CLAUDE_SWITCHER_DIR="$CONF"
+LOG="$CONF/bodyguard.log"
 MODE="__PROXY_MODE__"
 # 出口 IP 白名单(可选): 文件每行一个允许的出口 IP。存在且非空时,出口不在名单内即断线。
 # 日志不记录任何 IP。取不到出口连续 2 次也按失败处理(Fail-Closed)。
-ALLOW="$HOME/.claude-switcher/egress-allow"
+ALLOW="$CONF/egress-allow"
 # 可选: 存在 mihomo-secret 时,通过 mihomo API 检查 claude/anthropic 连接是否走 DIRECT(无需写死节点 IP)
 CHAIN="$(dirname "$0")/mihomo-chain-check.py"
-SECRET="$HOME/.claude-switcher/mihomo-secret"
-miss=0; amiss=0
+SECRET="$CONF/mihomo-secret"
+tick=0; miss=0; amiss=0
 
 while true; do
     ok=1; reason=""
@@ -31,7 +34,7 @@ while true; do
         other|auto)  : ;;  # other/auto 只查虚拟网卡(启发式,避免误杀)
         *)           pgrep -f 'verge-mihomo|mihomo' >/dev/null 2>&1 || ok=0 ;;
     esac
-    if [ -s "$ALLOW" ]; then
+    if [ -s "$ALLOW" ] && [ $((tick % 10)) -eq 0 ]; then
         cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
@@ -51,5 +54,6 @@ while true; do
         pkill -x claude
         echo "$(date '+%Y-%m-%d %H:%M:%S') ${reason:-代理离线(内核或TUN丢失)},已自动关闭 claude CLI" >>"$LOG"
     fi
+    tick=$((tick + 1))
     sleep 3
 done
