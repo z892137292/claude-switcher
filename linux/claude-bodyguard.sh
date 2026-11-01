@@ -8,7 +8,7 @@ MODE="__PROXY_MODE__"
 # 出口 IP 白名单(可选): 文件每行一个允许的出口 IP。存在且非空时,出口不在名单内即断线。
 # 日志不记录任何 IP。取不到出口连续 2 次也按失败处理(Fail-Closed)。
 ALLOW="$HOME/.claude-switcher/egress-allow"
-tick=0; miss=0
+miss=0
 
 while true; do
     ok=1; reason=""
@@ -28,8 +28,8 @@ while true; do
         other|auto)  : ;;  # other/auto 只查虚拟网卡(启发式,避免误杀)
         *)           pgrep -f 'verge-mihomo|mihomo' >/dev/null 2>&1 || ok=0 ;;
     esac
-    if [ -s "$ALLOW" ] && [ $((tick % 3)) -eq 0 ]; then
-        cur=$(curl -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+    if [ -s "$ALLOW" ]; then
+        cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
             [ "$miss" -ge 2 ] && ok=0 && reason="出口探测连续失败"
@@ -38,10 +38,9 @@ while true; do
             tr -d '\r' < "$ALLOW" | grep -qxF "$cur" || { ok=0; reason="出口IP不在白名单"; }
         fi
     fi
-    tick=$((tick + 1))
     if [ "$ok" -eq 0 ] && pgrep -x claude >/dev/null 2>&1; then
         pkill -x claude
         echo "$(date '+%Y-%m-%d %H:%M:%S') ${reason:-代理离线(内核或TUN丢失)},已自动关闭 claude CLI" >>"$LOG"
     fi
-    sleep 10
+    sleep 3
 done
