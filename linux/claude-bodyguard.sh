@@ -35,7 +35,7 @@ while true; do
             [ "$miss" -ge 2 ] && ok=0 && reason="出口探测连续失败"
         else
             miss=0
-            grep -qxF "$cur" "$ALLOW" || { ok=0; reason="出口IP不在白名单"; }
+            tr -d '\r' < "$ALLOW" | grep -qxF "$cur" || { ok=0; reason="出口IP不在白名单"; }
         fi
     fi
     tick=$((tick + 1))
