@@ -22,8 +22,8 @@ probe_trace() {
     [ -n "$t" ] || t=$(curl -s --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     printf '%s\n' "$t"
 }
-# 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),连续 UNLOCK_AFTER 轮正常才解除
-UNLOCK_AFTER=3
+# 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),一轮全部检查正常即解除(出口探测已带重试,无需多轮确认)
+UNLOCK_AFTER=1
 lock=0; good=0; egress_bad=0; egress_reason=""
 STATE="$CONF/state"; allow_m=""; last_state=""
 # 跟随模式: 存在 $CONF/egress-follow 且没有静态白名单时,只验证"当前节点"的出口 IP。
@@ -57,7 +57,7 @@ while true; do
             [ -n "$last_node" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') 节点已切换,重新学习出口" >>"$LOG"
             last_node="$node"; learned=""; miss=0; force=1
         fi
-        if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ]; then
+        if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ] || [ "$egress_bad" -eq 1 ]; then
             trace=$(probe_trace)
             cur=$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -1)
             loc=$(printf '%s\n' "$trace" | sed -n 's/^loc=//p' | head -1)
@@ -73,7 +73,7 @@ while true; do
                 else egress_bad=1; egress_reason="当前节点出口 IP 发生变化"; fi
             fi
         fi
-    elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
+    elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ "$egress_bad" -eq 1 ]; }; then
         cur=$(probe_trace | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
