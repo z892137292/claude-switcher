@@ -170,7 +170,7 @@ cmd_cleanup() {
 cmd_rollback() { need_root; bash "$DIR/install-root-bodyguard.sh" --rollback "${1:?用法: rollback <用户>}"; }
 
 nft_public_ips() {
-    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$1" | grep -vE '^(10\.|127\.|0\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|198\.1[89]\.|169\.254\.)' | sort -u
+    grep -E 'ip daddr [0-9]' "$1" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$1" | grep -vE '^(10\.|127\.|0\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|198\.1[89]\.|169\.254\.)' | sort -u
 }
 
 # 从 yaml 取全部节点 server 并解析为 IPv4(域名用 getent)
@@ -198,9 +198,10 @@ import re,sys
 src,dst,old,new=sys.argv[1],sys.argv[2],sys.argv[3].split(),sys.argv[4].split()
 lines=open(src,encoding="utf-8").read().split("\n")
 pat=re.compile("|".join(re.escape(o) for o in old))
+rule=re.compile(r"ip daddr ")
 out=[];tpl=None;done=False
 for l in lines:
-    if pat.search(l):
+    if rule.search(l) and pat.search(l):
         if tpl is None: tpl=l
         if not done:
             m=pat.search(l)
@@ -215,6 +216,16 @@ PY
     cat "$tmp" > "$NFT_FILE"; rm -f "$tmp"
     systemctl restart "$NFT_SVC" || { cat "$bak" > "$NFT_FILE"; systemctl restart "$NFT_SVC"; echo "X 重载防火墙失败,已还原"; return 1; }
     ok "防火墙已放行新节点 IP($(echo "$new_ips" | wc -l) 个),旧节点 IP 已移除"
+    check_nft_set "$new_ips"
+}
+
+# 防火墙若用命名集合(@mihomo_nodes)放行节点,提示其中是否已含新节点 IP(集合的维护方式因部署而异,不擅自改)
+check_nft_set() {
+    grep -q '@mihomo_nodes' "$NFT_FILE" 2>/dev/null || return 0
+    local setout ip miss=0
+    setout=$(nft list set inet vm104_guard mihomo_nodes 2>/dev/null) || { echo "  - 无法读取集合 mihomo_nodes,请确认其包含新节点 IP"; return 0; }
+    for ip in $1; do echo "$setout" | grep -qF "$ip" || miss=1; done
+    [ "$miss" -eq 0 ] && ok "集合 mihomo_nodes 已含新节点 IP" || echo "  ! 集合 mihomo_nodes 未包含全部新节点 IP,请检查其维护方式(若无其它脚本维护,需手动加入)"
 }
 
 # 更换节点配置(mihomo yaml)。全程先停保镖;任何一步失败都回滚旧配置并恢复保镖
