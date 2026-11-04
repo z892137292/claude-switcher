@@ -17,6 +17,8 @@ LIB=/usr/local/lib/claude-switcher
 SVC=claude-bodyguard-root
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MIHOMO_CFG_DEFAULT=/etc/mihomo/config.private.yaml
+NFT_FILE="${NFT_FILE:-/etc/mihomo/kill-switch.nft}"
+NFT_SVC="${NFT_SVC:-vm104-guard}"
 
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "X 需要 root: sudo bash $0 $*"; exit 1; }; }
 ok()   { echo "  ✓ $*"; }
@@ -167,6 +169,54 @@ cmd_cleanup() {
 
 cmd_rollback() { need_root; bash "$DIR/install-root-bodyguard.sh" --rollback "${1:?用法: rollback <用户>}"; }
 
+nft_public_ips() {
+    grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$1" | grep -vE '^(10\.|127\.|0\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|198\.1[89]\.|169\.254\.)' | sort -u
+}
+
+# 从 yaml 取全部节点 server 并解析为 IPv4(域名用 getent)
+yaml_node_ips() {
+    grep -E '^[[:space:]-]*server:|[{,][[:space:]]*server:' "$1" | sed -E 's/.*server:[[:space:]]*"?'"'"'?([^"'"'"',}[:space:]]+).*/\1/' | sort -u | while read -r h; do
+        [ -n "$h" ] || continue
+        if echo "$h" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then echo "$h"
+        else getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u; fi
+    done | sort -u
+}
+
+# 把防火墙里的节点 IP 同步为新 yaml 的节点 IP;旧文件备份到 $1(备份路径)
+sync_nft() {
+    local yaml="$1" bak="$2" new_ips old_ips tmp
+    [ -f "$NFT_FILE" ] || { echo "  - 无 $NFT_FILE,跳过防火墙同步"; return 0; }
+    new_ips=$(yaml_node_ips "$yaml")
+    [ -n "$new_ips" ] || { echo "X 新配置解析不出节点 IP(域名解析失败?),为避免断网中止"; return 1; }
+    old_ips=$(nft_public_ips "$NFT_FILE")
+    if [ "$old_ips" = "$new_ips" ]; then ok "防火墙节点 IP 已是最新"; return 0; fi
+    [ -n "$old_ips" ] || { echo "X 防火墙文件里找不到可替换的节点 IP,请手动处理"; return 1; }
+    tmp=$(mktemp)
+    # 取含公网 IP 的第一行为模板,每个新 IP 生成一行;其余含旧 IP 的行删除
+    python3 - "$NFT_FILE" "$tmp" "$old_ips" "$new_ips" <<'PY' || { rm -f "$tmp"; return 1; }
+import re,sys
+src,dst,old,new=sys.argv[1],sys.argv[2],sys.argv[3].split(),sys.argv[4].split()
+lines=open(src,encoding="utf-8").read().split("\n")
+pat=re.compile("|".join(re.escape(o) for o in old))
+out=[];tpl=None;done=False
+for l in lines:
+    if pat.search(l):
+        if tpl is None: tpl=l
+        if not done:
+            m=pat.search(l)
+            for ip in new: out.append(pat.sub(ip,tpl))
+            done=True
+        continue
+    out.append(l)
+open(dst,"w",encoding="utf-8").write("\n".join(out))
+PY
+    nft -c -f "$tmp" 2>/dev/null || { rm -f "$tmp"; echo "X 生成的防火墙文件校验失败,未改动"; return 1; }
+    cp -p "$NFT_FILE" "$bak"
+    cat "$tmp" > "$NFT_FILE"; rm -f "$tmp"
+    systemctl restart "$NFT_SVC" || { cat "$bak" > "$NFT_FILE"; systemctl restart "$NFT_SVC"; echo "X 重载防火墙失败,已还原"; return 1; }
+    ok "防火墙已放行新节点 IP($(echo "$new_ips" | wc -l) 个),旧节点 IP 已移除"
+}
+
 # 更换节点配置(mihomo yaml)。全程先停保镖;任何一步失败都回滚旧配置并恢复保镖
 cmd_set_yaml() {
     need_root
@@ -194,13 +244,15 @@ cmd_set_yaml() {
     systemctl stop $SVC 2>/dev/null
     cp -p "$cfg" "$bak"
     cat "$tmp" > "$cfg"; rm -f "$tmp"
-    local rolled=0
+    local nftbak="$bak.nft"
     rollback_yaml() {
         echo "X $1,回滚旧配置"
+        [ -f "$nftbak" ] && { cat "$nftbak" > "$NFT_FILE"; systemctl restart "$NFT_SVC"; }
         cat "$bak" > "$cfg"; systemctl restart mihomo; sleep 4
         cmd_sync "$cfg" >/dev/null 2>&1
         systemctl start $SVC; exit 1
     }
+    sync_nft "$cfg" "$nftbak" || rollback_yaml "防火墙同步失败"
     systemctl restart mihomo; sleep 4
     ip addr | grep -q '198\.18\.' || rollback_yaml "mihomo0 未恢复"
     cmd_sync "$cfg" >/dev/null || rollback_yaml "同步 API 失败"
@@ -219,7 +271,6 @@ cmd_set_yaml() {
     systemctl start $SVC
     if [ -s "$CONF/egress-allow" ]; then wait_guard_ok || exit 1
     else sleep 6; [ "$(cat "$CONF/state" 2>/dev/null)" = ok ] && ok "保镖状态正常" || bad "保镖状态异常,查看 $CONF/bodyguard.log"; fi
-    echo "提示: 防火墙 kill-switch.nft 里的节点 IP 如与新节点不同,需自行同步,否则断网(fail-closed)"
 }
 
 # 子命令含 exit,放进子 shell 执行,避免退出整个菜单
