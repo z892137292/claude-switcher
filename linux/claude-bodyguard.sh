@@ -15,6 +15,13 @@ ALLOW="$CONF/egress-allow"
 CHAIN="$(dirname "$0")/mihomo-chain-check.py"
 SECRET="$CONF/mihomo-secret"
 tick=0; miss=0; amiss=0
+# 出口探测:节点延迟可达数秒,单次超时放宽到 6 秒,失败立即重试一次,避免慢链路被误判为断线
+probe_trace() {
+    local t
+    t=$(curl -s --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    [ -n "$t" ] || t=$(curl -s --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+    printf '%s\n' "$t"
+}
 # 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),连续 UNLOCK_AFTER 轮正常才解除
 UNLOCK_AFTER=3
 lock=0; good=0; egress_bad=0; egress_reason=""
@@ -51,7 +58,7 @@ while true; do
             last_node="$node"; learned=""; miss=0; force=1
         fi
         if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ]; then
-            trace=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+            trace=$(probe_trace)
             cur=$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -1)
             loc=$(printf '%s\n' "$trace" | sed -n 's/^loc=//p' | head -1)
             if [ -z "$cur" ]; then
@@ -67,7 +74,7 @@ while true; do
             fi
         fi
     elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
-        cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
+        cur=$(probe_trace | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
             [ "$miss" -ge 2 ] && { egress_bad=1; egress_reason="出口探测连续失败"; }
