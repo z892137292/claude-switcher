@@ -55,7 +55,24 @@ cmd_set_egress() {
     [ "$a" = "y" ] || { echo "已取消"; exit 0; }
     install -d -m 700 -o root -g root "$CONF"
     printf '%s\n' "$ip" > "$CONF/egress-allow"; chmod 600 "$CONF/egress-allow"
-    echo "✓ 已写入白名单(下一轮探测生效,无需重启)"
+    echo "✓ 已写入白名单,等待保镖重新检测..."
+    wait_guard_ok
+}
+
+# 等保镖重新探测并确认恢复正常运行(最多 ~45 秒)
+wait_guard_ok() {
+    local i st
+    [ "$(systemctl is-active $SVC)" = active ] || { echo "  ✗ root 保镖未运行,请先 install"; return 1; }
+    for i in $(seq 1 15); do
+        sleep 3
+        st=$(cat "$CONF/state" 2>/dev/null)
+        if [ "$st" = ok ] && [ "$(( $(date +%s) - $(stat -c %Y "$CONF/egress-allow") ))" -ge 4 ]; then
+            ok "保镖已重新检测:状态正常,已恢复正常运行(未锁定)"; return 0
+        fi
+        printf '  . 状态: %s (%ss)\n' "${st:-未知}" $((i * 3))
+    done
+    bad "超时仍处于锁定/未知状态,查看: sudo tail $CONF/bodyguard.log;若白名单有误请重新运行 set-egress"
+    return 1
 }
 
 cmd_status() {
