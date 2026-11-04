@@ -18,6 +18,7 @@ tick=0; miss=0; amiss=0
 # 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),连续 UNLOCK_AFTER 轮正常才解除
 UNLOCK_AFTER=3
 lock=0; good=0; egress_bad=0; egress_reason=""
+STATE="$CONF/state"; allow_m=""; last_state=""
 
 while true; do
     ok=1; reason=""
@@ -37,7 +38,10 @@ while true; do
         other|auto)  : ;;  # other/auto 只查虚拟网卡(启发式,避免误杀)
         *)           pgrep -f 'verge-mihomo|mihomo' >/dev/null 2>&1 || ok=0 ;;
     esac
-    if [ -s "$ALLOW" ] && [ $((tick % 10)) -eq 0 ]; then
+    # 白名单被修改后立即重新探测,不必等 30 秒周期
+    cur_m=$(stat -c %Y "$ALLOW" 2>/dev/null)
+    force=0; [ "$cur_m" != "$allow_m" ] && { force=1; allow_m="$cur_m"; miss=0; }
+    if [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
         cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
@@ -70,6 +74,8 @@ while true; do
             echo "$(ts) 解除锁定(连续 ${UNLOCK_AFTER} 轮正常)" >>"$LOG"
         fi
     fi
+    new_state=ok; [ "$lock" -eq 1 ] && new_state="locked"
+    [ "$new_state" != "$last_state" ] && { echo "$new_state" >"$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"; last_state="$new_state"; }
     if [ "$lock" -eq 1 ]; then
         if pgrep -x claude >/dev/null 2>&1; then
             pkill -x claude

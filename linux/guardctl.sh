@@ -8,6 +8,8 @@
 #   harden-controller [配置]    external-controller 改为仅本机监听,并安全重启 mihomo
 #   cleanup <用户>              删除该用户目录下的旧配置副本
 #   rollback <用户>             回滚到用户态保镖
+#   set-yaml <新配置> [目标配置]  更换节点配置:校验、备份、重启 mihomo、同步 API、更新白名单、确认恢复,失败自动回滚
+#   menu                       终端菜单面板(无参数时默认进入)
 set -u
 umask 022
 CONF=/etc/claude-switcher
@@ -15,6 +17,8 @@ LIB=/usr/local/lib/claude-switcher
 SVC=claude-bodyguard-root
 DIR="$(cd "$(dirname "$0")" && pwd)"
 MIHOMO_CFG_DEFAULT=/etc/mihomo/config.private.yaml
+NFT_FILE="${NFT_FILE:-/etc/mihomo/kill-switch.nft}"
+NFT_SVC="${NFT_SVC:-vm104-guard}"
 
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "X 需要 root: sudo bash $0 $*"; exit 1; }; }
 ok()   { echo "  ✓ $*"; }
@@ -54,7 +58,24 @@ cmd_set_egress() {
     [ "$a" = "y" ] || { echo "已取消"; exit 0; }
     install -d -m 700 -o root -g root "$CONF"
     printf '%s\n' "$ip" > "$CONF/egress-allow"; chmod 600 "$CONF/egress-allow"
-    echo "✓ 已写入白名单(下一轮探测生效,无需重启)"
+    echo "✓ 已写入白名单,等待保镖重新检测..."
+    wait_guard_ok
+}
+
+# 等保镖重新探测并确认恢复正常运行(最多 ~45 秒)
+wait_guard_ok() {
+    local i st
+    [ "$(systemctl is-active $SVC)" = active ] || { echo "  ✗ root 保镖未运行,请先 install"; return 1; }
+    for i in $(seq 1 15); do
+        sleep 3
+        st=$(cat "$CONF/state" 2>/dev/null)
+        if [ "$st" = ok ] && [ "$(( $(date +%s) - $(stat -c %Y "$CONF/egress-allow") ))" -ge 4 ]; then
+            ok "保镖已重新检测:状态正常,已恢复正常运行(未锁定)"; return 0
+        fi
+        printf '  . 状态: %s (%ss)\n' "${st:-未知}" $((i * 3))
+    done
+    bad "超时仍处于锁定/未知状态,查看: sudo tail $CONF/bodyguard.log;若白名单有误请重新运行 set-egress"
+    return 1
 }
 
 cmd_status() {
@@ -148,8 +169,157 @@ cmd_cleanup() {
 
 cmd_rollback() { need_root; bash "$DIR/install-root-bodyguard.sh" --rollback "${1:?用法: rollback <用户>}"; }
 
+nft_public_ips() {
+    grep -E 'ip daddr [0-9]' "$1" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$1" | grep -vE '^(10\.|127\.|0\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|198\.1[89]\.|169\.254\.)' | sort -u
+}
+
+# 从 yaml 取全部节点 server 并解析为 IPv4(域名用 getent)
+yaml_node_ips() {
+    grep -E '^[[:space:]-]*server:|[{,][[:space:]]*server:' "$1" | sed -E 's/.*server:[[:space:]]*"?'"'"'?([^"'"'"',}[:space:]]+).*/\1/' | sort -u | while read -r h; do
+        [ -n "$h" ] || continue
+        if echo "$h" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then echo "$h"
+        else getent ahostsv4 "$h" 2>/dev/null | awk '{print $1}' | sort -u; fi
+    done | sort -u
+}
+
+# 把防火墙里的节点 IP 同步为新 yaml 的节点 IP;旧文件备份到 $1(备份路径)
+sync_nft() {
+    local yaml="$1" bak="$2" new_ips old_ips tmp
+    [ -f "$NFT_FILE" ] || { echo "  - 无 $NFT_FILE,跳过防火墙同步"; return 0; }
+    new_ips=$(yaml_node_ips "$yaml")
+    [ -n "$new_ips" ] || { echo "X 新配置解析不出节点 IP(域名解析失败?),为避免断网中止"; return 1; }
+    old_ips=$(nft_public_ips "$NFT_FILE")
+    if [ "$old_ips" = "$new_ips" ]; then ok "防火墙节点 IP 已是最新"; return 0; fi
+    [ -n "$old_ips" ] || { echo "X 防火墙文件里找不到可替换的节点 IP,请手动处理"; return 1; }
+    tmp=$(mktemp)
+    # 取含公网 IP 的第一行为模板,每个新 IP 生成一行;其余含旧 IP 的行删除
+    python3 - "$NFT_FILE" "$tmp" "$old_ips" "$new_ips" <<'PY' || { rm -f "$tmp"; return 1; }
+import re,sys
+src,dst,old,new=sys.argv[1],sys.argv[2],sys.argv[3].split(),sys.argv[4].split()
+lines=open(src,encoding="utf-8").read().split("\n")
+pat=re.compile("|".join(re.escape(o) for o in old))
+rule=re.compile(r"ip daddr ")
+out=[];tpl=None;done=False
+for l in lines:
+    if rule.search(l) and pat.search(l):
+        if tpl is None: tpl=l
+        if not done:
+            m=pat.search(l)
+            for ip in new: out.append(pat.sub(ip,tpl))
+            done=True
+        continue
+    out.append(l)
+open(dst,"w",encoding="utf-8").write("\n".join(out))
+PY
+    nft -c -f "$tmp" 2>/dev/null || { rm -f "$tmp"; echo "X 生成的防火墙文件校验失败,未改动"; return 1; }
+    cp -p "$NFT_FILE" "$bak"
+    cat "$tmp" > "$NFT_FILE"; rm -f "$tmp"
+    systemctl restart "$NFT_SVC" || { cat "$bak" > "$NFT_FILE"; systemctl restart "$NFT_SVC"; echo "X 重载防火墙失败,已还原"; return 1; }
+    ok "防火墙已放行新节点 IP($(echo "$new_ips" | wc -l) 个),旧节点 IP 已移除"
+    check_nft_set "$new_ips"
+}
+
+# 防火墙若用命名集合(@mihomo_nodes)放行节点,提示其中是否已含新节点 IP(集合的维护方式因部署而异,不擅自改)
+check_nft_set() {
+    grep -q '@mihomo_nodes' "$NFT_FILE" 2>/dev/null || return 0
+    local setout ip miss=0
+    setout=$(nft list set inet vm104_guard mihomo_nodes 2>/dev/null) || { echo "  - 无法读取集合 mihomo_nodes,请确认其包含新节点 IP"; return 0; }
+    echo "$setout" | grep -q 'elements' || return 0   # 空集合=未使用,无需处理
+    for ip in $1; do echo "$setout" | grep -qF "$ip" || miss=1; done
+    [ "$miss" -eq 0 ] && ok "集合 mihomo_nodes 已含新节点 IP" || echo "  ! 集合 mihomo_nodes 未包含全部新节点 IP,请检查其维护方式(若无其它脚本维护,需手动加入)"
+}
+
+# 更换节点配置(mihomo yaml)。全程先停保镖;任何一步失败都回滚旧配置并恢复保镖
+cmd_set_yaml() {
+    need_root
+    local new="${1:?用法: set-yaml <新yaml路径> [目标配置]}" cfg="${2:-$MIHOMO_CFG_DEFAULT}"
+    [ -r "$new" ] || { echo "X 读不到 $new"; exit 1; }
+    [ -f "$cfg" ] || { echo "X 目标配置不存在: $cfg"; exit 1; }
+    local bak="$cfg.bak-yaml.$(date +%s)" tmp
+    tmp=$(mktemp "$cfg.new.XXXXXX") || exit 1
+    cp "$new" "$tmp"
+    # 新配置缺 API 设置时沿用旧配置的值;controller 一律收紧为仅本机
+    if ! grep -qE '^secret:[[:space:]]*[^[:space:]#]' "$tmp"; then
+        local old_secret; old_secret=$(grep -E '^secret:' "$cfg" | head -1)
+        [ -n "$old_secret" ] || { rm -f "$tmp"; echo "X 新旧配置都没有 secret"; exit 1; }
+        sed -i -E '/^secret:/d' "$tmp"; printf '%s\n' "$old_secret" >> "$tmp"
+    fi
+    sed -i -E '/^external-controller:/d' "$tmp"
+    printf 'external-controller: 127.0.0.1:9090\n' >> "$tmp"
+    if command -v mihomo >/dev/null 2>&1; then
+        mihomo -d "$(dirname "$cfg")" -t -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; echo "X mihomo 校验新配置失败,未改动"; exit 1; }
+        ok "mihomo 校验通过"
+    else echo "  - 未找到 mihomo 命令,跳过语法校验"; fi
+    echo "将替换 $cfg(备份 $bak),期间保镖暂停、代理短暂中断。"
+    read -r -p "继续? [y/N] " a
+    [ "$a" = "y" ] || { rm -f "$tmp"; echo "已取消"; exit 0; }
+    systemctl stop $SVC 2>/dev/null
+    cp -p "$cfg" "$bak"
+    cat "$tmp" > "$cfg"; rm -f "$tmp"
+    local nftbak="$bak.nft"
+    rollback_yaml() {
+        echo "X $1,回滚旧配置"
+        [ -f "$nftbak" ] && { cat "$nftbak" > "$NFT_FILE"; systemctl restart "$NFT_SVC"; }
+        cat "$bak" > "$cfg"; systemctl restart mihomo; sleep 4
+        cmd_sync "$cfg" >/dev/null 2>&1
+        systemctl start $SVC; exit 1
+    }
+    sync_nft "$cfg" "$nftbak" || rollback_yaml "防火墙同步失败"
+    systemctl restart mihomo; sleep 4
+    ip addr | grep -q '198\.18\.' || rollback_yaml "mihomo0 未恢复"
+    cmd_sync "$cfg" >/dev/null || rollback_yaml "同步 API 失败"
+    local rc=2 i
+    for i in 1 2 3 4 5; do chain_check; rc=$?; [ "$rc" -ne 2 ] && break; sleep 2; done
+    [ "$rc" -eq 0 ] || rollback_yaml "API 预检失败($rc)"
+    local loc ip
+    loc=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^loc=//p')
+    ip=$(egress_ip)
+    { [ -n "$ip" ] && [ -n "$loc" ] && [ "$loc" != CN ]; } || rollback_yaml "新节点出口异常(国家: ${loc:-未知})"
+    ok "新节点出口国家: $loc"
+    if [ -s "$CONF/egress-allow" ]; then
+        printf '%s\n' "$ip" > "$CONF/egress-allow"; chmod 600 "$CONF/egress-allow"
+        ok "白名单已更新为新出口"
+    fi
+    systemctl start $SVC
+    if [ -s "$CONF/egress-allow" ]; then wait_guard_ok || exit 1
+    else sleep 6; [ "$(cat "$CONF/state" 2>/dev/null)" = ok ] && ok "保镖状态正常" || bad "保镖状态异常,查看 $CONF/bodyguard.log"; fi
+}
+
+# 子命令含 exit,放进子 shell 执行,避免退出整个菜单
+cmd_menu() {
+    need_root
+    local def_user="${SUDO_USER:-claude}" n u m
+    while true; do
+        echo; echo "===== Claude 保镖面板 ====="
+        echo " 1) 状态体检        2) 同步 mihomo API 配置"
+        echo " 3) 更新出口白名单  4) 安装/更新 root 保镖"
+        echo " 5) API 改仅本机监听 6) 清理旧配置副本"
+        echo " 7) 回滚用户态保镖  8) 查看保镖日志"
+        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)   0) 退出"
+        read -r -p "选择: " n
+        case "$n" in
+            1) (cmd_status) ;;
+            2) read -r -p "mihomo 配置路径 [$MIHOMO_CFG_DEFAULT]: " u; (cmd_sync "${u:-$MIHOMO_CFG_DEFAULT}") ;;
+            3) (cmd_set_egress) ;;
+            4) read -r -p "代理模式 [mihomo]: " m; read -r -p "运行用户 [$def_user]: " u
+               (cmd_install "${m:-mihomo}" "${u:-$def_user}") ;;
+            5) (cmd_harden_controller) ;;
+            6) read -r -p "用户 [$def_user]: " u; (cmd_cleanup "${u:-$def_user}") ;;
+            7) read -r -p "用户 [$def_user]: " u; (cmd_rollback "${u:-$def_user}") ;;
+            8) tail -n 20 "$CONF/bodyguard.log" 2>/dev/null || echo "  无触发记录" ;;
+            9) bash "$DIR/claude-switch.sh" checkdetail ;;
+            a) read -r -p "新 yaml 路径: " u; (cmd_set_yaml "$u") ;;
+            0|q|"") return 0 ;;
+            *) echo "无效选择" ;;
+        esac
+    done
+}
+
 c="${1:-}"; shift || true
+[ -z "$c" ] && [ -t 0 ] && c=menu
 case "$c" in
+    menu) cmd_menu ;;
+    set-yaml) cmd_set_yaml "$@" ;;
     status) cmd_status ;;
     sync) cmd_sync "$@" ;;
     set-egress) cmd_set_egress ;;
