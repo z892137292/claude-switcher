@@ -22,8 +22,8 @@ probe_trace() {
     [ -n "$t" ] || t=$(curl -s --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
     printf '%s\n' "$t"
 }
-# 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),连续 UNLOCK_AFTER 轮正常才解除
-UNLOCK_AFTER=3
+# 锁定模式: 异常后每 0.5 秒清杀 claude(重启也活不过半秒),一轮全部检查正常即解除(出口探测已带重试,无需多轮确认)
+UNLOCK_AFTER=1
 lock=0; good=0; egress_bad=0; egress_reason=""
 STATE="$CONF/state"; allow_m=""; last_state=""
 # 跟随模式: 存在 $CONF/egress-follow 且没有静态白名单时,只验证"当前节点"的出口 IP。
