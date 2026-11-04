@@ -9,6 +9,7 @@
 #   cleanup <用户>              删除该用户目录下的旧配置副本
 #   rollback <用户>             回滚到用户态保镖
 #   set-yaml <新配置> [目标配置]  更换节点配置:校验、备份、重启 mihomo、同步 API、更新白名单、确认恢复,失败自动回滚
+#   diagnose [秒数]            抓取 claude/anthropic 走 DIRECT 的连接(域名/规则,不含 IP),默认 120 秒
 #   menu                       终端菜单面板(无参数时默认进入)
 set -u
 umask 022
@@ -285,6 +286,31 @@ cmd_set_yaml() {
     else sleep 6; [ "$(cat "$CONF/state" 2>/dev/null)" = ok ] && ok "保镖状态正常" || bad "保镖状态异常,查看 $CONF/bodyguard.log"; fi
 }
 
+# 抓取 claude/anthropic 域名走 DIRECT 的连接,汇总显示命中的域名与规则(不输出 IP)
+cmd_diagnose() {
+    need_root
+    local secs="${1:-120}" api sec out i
+    api=$(cat "$CONF/mihomo-api" 2>/dev/null); sec=$(cat "$CONF/mihomo-secret" 2>/dev/null)
+    [ -n "$api" ] || { echo "X 缺少 $CONF/mihomo-api,先运行 sync"; exit 1; }
+    out=$(mktemp)
+    echo "抓取 ${secs} 秒,请在此期间正常使用 claude..."
+    for i in $(seq 1 $((secs / 2))); do
+        curl -s --max-time 3 -H "Authorization: Bearer $sec" "$api/connections" | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for c in d.get("connections") or []:
+    m=c.get("metadata") or {}; h=(m.get("host") or "").lower()
+    if ("claude" in h or "anthropic" in h) and "DIRECT" in (c.get("chains") or []):
+        print(h, "|规则:", c.get("rule"), c.get("rulePayload"), "|进程:", m.get("process") or "-")
+' >> "$out"
+        sleep 2
+    done
+    if [ -s "$out" ]; then echo "命中 DIRECT 的连接(次数 域名 规则 进程):"; sort "$out" | uniq -c | sort -rn
+    else echo "✓ 期间没有 claude/anthropic 连接走 DIRECT"; fi
+    rm -f "$out"
+}
+
 # 子命令含 exit,放进子 shell 执行,避免退出整个菜单
 cmd_menu() {
     need_root
@@ -295,7 +321,7 @@ cmd_menu() {
         echo " 3) 更新出口白名单  4) 安装/更新 root 保镖"
         echo " 5) API 改仅本机监听 6) 清理旧配置副本"
         echo " 7) 回滚用户态保镖  8) 查看保镖日志"
-        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)   0) 退出"
+        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)\n b) 抓取 DIRECT 连接(诊断)   0) 退出"
         read -r -p "选择: " n
         case "$n" in
             1) (cmd_status) ;;
@@ -308,7 +334,8 @@ cmd_menu() {
             7) read -r -p "用户 [$def_user]: " u; (cmd_rollback "${u:-$def_user}") ;;
             8) tail -n 20 "$CONF/bodyguard.log" 2>/dev/null || echo "  无触发记录" ;;
             9) bash "$DIR/claude-switch.sh" checkdetail ;;
-            a) read -r -p "新 yaml 路径: " u; (cmd_set_yaml "$u") ;;
+            a) read -r -p "新 yaml 路径(留空返回): " u; [ -n "$u" ] && (cmd_set_yaml "$u") ;;
+            b) read -r -p "抓取秒数 [120]: " u; (cmd_diagnose "${u:-120}") ;;
             0|q|"") return 0 ;;
             *) echo "无效选择" ;;
         esac
@@ -319,6 +346,7 @@ c="${1:-}"; shift || true
 [ -z "$c" ] && [ -t 0 ] && c=menu
 case "$c" in
     menu) cmd_menu ;;
+    diagnose) cmd_diagnose "$@" ;;
     set-yaml) cmd_set_yaml "$@" ;;
     status) cmd_status ;;
     sync) cmd_sync "$@" ;;
