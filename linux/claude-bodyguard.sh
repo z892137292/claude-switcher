@@ -57,7 +57,7 @@ while true; do
             [ -n "$last_node" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') 节点已切换,重新学习出口" >>"$LOG"
             last_node="$node"; learned=""; miss=0; force=1
         fi
-        if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ]; then
+        if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ] || [ "$egress_bad" -eq 1 ]; then
             trace=$(probe_trace)
             cur=$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -1)
             loc=$(printf '%s\n' "$trace" | sed -n 's/^loc=//p' | head -1)
@@ -73,7 +73,7 @@ while true; do
                 else egress_bad=1; egress_reason="当前节点出口 IP 发生变化"; fi
             fi
         fi
-    elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
+    elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ "$egress_bad" -eq 1 ]; }; then
         cur=$(probe_trace | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
