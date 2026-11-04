@@ -19,6 +19,9 @@ tick=0; miss=0; amiss=0
 UNLOCK_AFTER=3
 lock=0; good=0; egress_bad=0; egress_reason=""
 STATE="$CONF/state"; allow_m=""; last_state=""
+# 跟随模式: 存在 $CONF/egress-follow 且没有静态白名单时,只验证"当前节点"的出口 IP。
+# 节点切换(面板/自动备用)后自动重新学习新出口;同一节点下出口 IP 变化才断线。学到 CN 出口则拒绝。
+FOLLOW="$CONF/egress-follow"; last_node=""; learned=""
 
 while true; do
     ok=1; reason=""
@@ -41,7 +44,29 @@ while true; do
     # 白名单被修改后立即重新探测,不必等 30 秒周期
     cur_m=$(stat -c %Y "$ALLOW" 2>/dev/null)
     force=0; [ "$cur_m" != "$allow_m" ] && { force=1; allow_m="$cur_m"; miss=0; }
-    if [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
+    if [ ! -s "$ALLOW" ] && [ -f "$FOLLOW" ] && [ -s "$SECRET" ] && [ -f "$CHAIN" ]; then
+        node=$(python3 "$CHAIN" --node 2>/dev/null)
+        if [ -n "$node" ] && [ "$node" != "$last_node" ]; then
+            [ -n "$last_node" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') 节点已切换,重新学习出口" >>"$LOG"
+            last_node="$node"; learned=""; miss=0; force=1
+        fi
+        if [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ] || [ -z "$learned" ]; then
+            trace=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+            cur=$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -1)
+            loc=$(printf '%s\n' "$trace" | sed -n 's/^loc=//p' | head -1)
+            if [ -z "$cur" ]; then
+                miss=$((miss + 1))
+                [ "$miss" -ge 2 ] && { egress_bad=1; egress_reason="出口探测连续失败"; }
+            else
+                miss=0
+                if [ -z "$learned" ]; then
+                    if [ "$loc" = "CN" ]; then egress_bad=1; egress_reason="当前节点出口在 CN"
+                    else learned="$cur"; egress_bad=0; fi
+                elif [ "$cur" = "$learned" ]; then egress_bad=0
+                else egress_bad=1; egress_reason="当前节点出口 IP 发生变化"; fi
+            fi
+        fi
+    elif [ -s "$ALLOW" ] && { [ "$force" -eq 1 ] || [ $((tick % 10)) -eq 0 ]; }; then
         cur=$(curl -s --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
@@ -51,7 +76,7 @@ while true; do
             if tr -d '\r' < "$ALLOW" | grep -qxF "$cur"; then egress_bad=0; else egress_bad=1; egress_reason="出口IP不在白名单"; fi
         fi
     else
-        [ -s "$ALLOW" ] || egress_bad=0
+        { [ -s "$ALLOW" ] || [ -f "$FOLLOW" ]; } || egress_bad=0
     fi
     [ "$egress_bad" -eq 1 ] && { ok=0; reason="$egress_reason"; }
     if [ -s "$SECRET" ] && [ -f "$CHAIN" ]; then

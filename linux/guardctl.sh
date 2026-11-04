@@ -10,6 +10,7 @@
 #   rollback <用户>             回滚到用户态保镖
 #   set-yaml <新配置> [目标配置]  更换节点配置:校验、备份、重启 mihomo、同步 API、更新白名单、确认恢复,失败自动回滚
 #   diagnose [秒数]            抓取 claude/anthropic 走 DIRECT 的连接(域名/规则,不含 IP),默认 120 秒
+#   egress-mode follow|static  出口校验模式: follow=只验证当前节点出口(节点切换自动重学);static=固定白名单
 #   menu                       终端菜单面板(无参数时默认进入)
 set -u
 umask 022
@@ -106,6 +107,7 @@ cmd_status() {
     [ -n "$ip" ] && echo "  出口国家: ${loc:-未知}" || bad "取不到出口"
     if [ -s "$CONF/egress-allow" ]; then
         tr -d '\r' < "$CONF/egress-allow" | grep -qxF "$ip" && ok "出口在白名单内" || bad "出口不在白名单(30 秒内会终止 claude)"
+    elif [ -f "$CONF/egress-follow" ]; then ok "出口校验: 跟随当前节点(保镖状态: $(cat "$CONF/state" 2>/dev/null || echo 未知))"
     else echo "  - 白名单未启用"; fi
     echo "== 会话 =="
     echo "  claude 进程数: $(pgrep -x claude | wc -l)"
@@ -311,6 +313,28 @@ for c in d.get("connections") or []:
     rm -f "$out"
 }
 
+cmd_egress_mode() {
+    need_root
+    case "${1:-}" in
+        follow)
+            [ -s "$CONF/mihomo-secret" ] || { echo "X follow 依赖 mihomo API,先运行 sync"; exit 1; }
+            local n; n=$(CLAUDE_SWITCHER_DIR="$CONF" python3 "$LIB/mihomo-chain-check.py" --node)
+            [ -n "$n" ] || { echo "X 取不到当前节点(策略组默认 GLOBAL,可设置环境变量 MIHOMO_GROUP)"; exit 1; }
+            ok "当前节点已识别"
+            [ -s "$CONF/egress-allow" ] && mv -f "$CONF/egress-allow" "$CONF/egress-allow.disabled"
+            : > "$CONF/egress-follow"; chmod 600 "$CONF/egress-follow"
+            echo "✓ 已启用跟随模式:只验证当前节点出口,切换节点自动重学。保镖需重启以载入新逻辑:"
+            echo "  sudo bash $0 install mihomo <用户>"
+            ;;
+        static)
+            rm -f "$CONF/egress-follow"
+            [ -f "$CONF/egress-allow.disabled" ] && mv -f "$CONF/egress-allow.disabled" "$CONF/egress-allow" && ok "已恢复固定白名单"
+            echo "✓ 已切回固定白名单模式(如无白名单,运行 set-egress)"
+            ;;
+        *) echo "用法: egress-mode follow|static"; exit 1 ;;
+    esac
+}
+
 # 子命令含 exit,放进子 shell 执行,避免退出整个菜单
 cmd_menu() {
     need_root
@@ -321,7 +345,8 @@ cmd_menu() {
         echo " 3) 更新出口白名单  4) 安装/更新 root 保镖"
         echo " 5) API 改仅本机监听 6) 清理旧配置副本"
         echo " 7) 回滚用户态保镖  8) 查看保镖日志"
-        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)\n b) 抓取 DIRECT 连接(诊断)   0) 退出"
+        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)"
+        echo " b) 抓取 DIRECT 连接(诊断)  c) 出口校验模式(follow/static)   0) 退出"
         read -r -p "选择: " n
         case "$n" in
             1) (cmd_status) ;;
@@ -335,6 +360,7 @@ cmd_menu() {
             8) tail -n 20 "$CONF/bodyguard.log" 2>/dev/null || echo "  无触发记录" ;;
             9) bash "$DIR/claude-switch.sh" checkdetail ;;
             a) read -r -p "新 yaml 路径(留空返回): " u; [ -n "$u" ] && (cmd_set_yaml "$u") ;;
+            c) read -r -p "模式 follow|static: " u; (cmd_egress_mode "$u") ;;
             b) read -r -p "抓取秒数 [120]: " u; (cmd_diagnose "${u:-120}") ;;
             0|q|"") return 0 ;;
             *) echo "无效选择" ;;
@@ -346,6 +372,7 @@ c="${1:-}"; shift || true
 [ -z "$c" ] && [ -t 0 ] && c=menu
 case "$c" in
     menu) cmd_menu ;;
+    egress-mode) cmd_egress_mode "$@" ;;
     diagnose) cmd_diagnose "$@" ;;
     set-yaml) cmd_set_yaml "$@" ;;
     status) cmd_status ;;
