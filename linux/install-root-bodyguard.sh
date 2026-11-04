@@ -66,7 +66,8 @@ systemctl --machine="$U"@.host --user disable --now claude-bodyguard.service 2>/
     || echo "! 请以 $U 身份执行: systemctl --user disable --now claude-bodyguard"
 
 systemctl daemon-reload
-systemctl enable --now claude-bodyguard-root.service
+systemctl enable claude-bodyguard-root.service
+systemctl restart claude-bodyguard-root.service  # 已在运行时 enable --now 不会重启,必须 restart 才载入新脚本
 sleep 1
 systemctl is-active claude-bodyguard-root.service
 echo "✓ root 保镖已启动。验证: systemctl status claude-bodyguard-root; 日志: $CONF/bodyguard.log"
