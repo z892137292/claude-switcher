@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """查询 mihomo /connections: claude/anthropic 域名的连接若走 DIRECT 即判定绕过代理。
 退出码: 0=正常 1=发现直连 2=API 不可用。
+加 --node 参数: 打印当前使用的节点名(沿策略组 now 链解析,可用 MIHOMO_GROUP 指定起始组,默认 GLOBAL)。
 配置: ~/.claude-switcher/mihomo-api (一行,默认 http://127.0.0.1:9090)
 密钥: ~/.claude-switcher/mihomo-secret (仅文件读取,不进命令行/日志)"""
 import json, os, sys, urllib.request
@@ -17,9 +18,33 @@ def read(name, default=""):
         return default
 
 
+def current_node(url, secret):
+    """沿策略组 now 链走到叶子节点,返回当前使用的节点名(取不到返回空)。"""
+    req = urllib.request.Request(url + "/proxies")
+    if secret:
+        req.add_header("Authorization", "Bearer " + secret)
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            proxies = json.load(r).get("proxies") or {}
+    except Exception:
+        return ""
+    name = os.environ.get("MIHOMO_GROUP") or ("GLOBAL" if "GLOBAL" in proxies else "")
+    if not name:
+        return ""
+    for _ in range(10):
+        now = (proxies.get(name) or {}).get("now")
+        if not now:
+            break
+        name = now
+    return name
+
+
 def main():
     url = read("mihomo-api", "http://127.0.0.1:9090").rstrip("/")
     secret = read("mihomo-secret")
+    if "--node" in sys.argv:
+        print(current_node(url, secret))
+        return 0
     req = urllib.request.Request(url + "/connections")
     if secret:
         req.add_header("Authorization", "Bearer " + secret)
