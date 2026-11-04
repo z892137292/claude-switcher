@@ -63,7 +63,7 @@ while true; do
             loc=$(printf '%s\n' "$trace" | sed -n 's/^loc=//p' | head -1)
             if [ -z "$cur" ]; then
                 miss=$((miss + 1))
-                [ "$miss" -ge 2 ] && { egress_bad=1; egress_reason="出口探测连续失败"; }
+                egress_bad=1; egress_reason="出口探测失败(测不出来即不放行)"
             else
                 miss=0
                 if [ -z "$learned" ]; then
@@ -77,7 +77,7 @@ while true; do
         cur=$(probe_trace | sed -n 's/^ip=//p' | head -1)
         if [ -z "$cur" ]; then
             miss=$((miss + 1))
-            [ "$miss" -ge 2 ] && { egress_bad=1; egress_reason="出口探测连续失败"; }
+            egress_bad=1; egress_reason="出口探测失败(测不出来即不放行)"
         else
             miss=0
             if tr -d '\r' < "$ALLOW" | grep -qxF "$cur"; then egress_bad=0; else egress_bad=1; egress_reason="出口IP不在白名单"; fi
