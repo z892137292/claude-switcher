@@ -224,6 +224,7 @@ check_nft_set() {
     grep -q '@mihomo_nodes' "$NFT_FILE" 2>/dev/null || return 0
     local setout ip miss=0
     setout=$(nft list set inet vm104_guard mihomo_nodes 2>/dev/null) || { echo "  - 无法读取集合 mihomo_nodes,请确认其包含新节点 IP"; return 0; }
+    echo "$setout" | grep -q 'elements' || return 0   # 空集合=未使用,无需处理
     for ip in $1; do echo "$setout" | grep -qF "$ip" || miss=1; done
     [ "$miss" -eq 0 ] && ok "集合 mihomo_nodes 已含新节点 IP" || echo "  ! 集合 mihomo_nodes 未包含全部新节点 IP,请检查其维护方式(若无其它脚本维护,需手动加入)"
 }
