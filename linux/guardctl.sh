@@ -8,6 +8,7 @@
 #   harden-controller [配置]    external-controller 改为仅本机监听,并安全重启 mihomo
 #   cleanup <用户>              删除该用户目录下的旧配置副本
 #   rollback <用户>             回滚到用户态保镖
+#   set-yaml <新配置> [目标配置]  更换节点配置:校验、备份、重启 mihomo、同步 API、更新白名单、确认恢复,失败自动回滚
 #   menu                       终端菜单面板(无参数时默认进入)
 set -u
 umask 022
@@ -166,6 +167,61 @@ cmd_cleanup() {
 
 cmd_rollback() { need_root; bash "$DIR/install-root-bodyguard.sh" --rollback "${1:?用法: rollback <用户>}"; }
 
+# 更换节点配置(mihomo yaml)。全程先停保镖;任何一步失败都回滚旧配置并恢复保镖
+cmd_set_yaml() {
+    need_root
+    local new="${1:?用法: set-yaml <新yaml路径> [目标配置]}" cfg="${2:-$MIHOMO_CFG_DEFAULT}"
+    [ -r "$new" ] || { echo "X 读不到 $new"; exit 1; }
+    [ -f "$cfg" ] || { echo "X 目标配置不存在: $cfg"; exit 1; }
+    local bak="$cfg.bak-yaml.$(date +%s)" tmp
+    tmp=$(mktemp "$cfg.new.XXXXXX") || exit 1
+    cp "$new" "$tmp"
+    # 新配置缺 API 设置时沿用旧配置的值;controller 一律收紧为仅本机
+    if ! grep -qE '^secret:[[:space:]]*[^[:space:]#]' "$tmp"; then
+        local old_secret; old_secret=$(grep -E '^secret:' "$cfg" | head -1)
+        [ -n "$old_secret" ] || { rm -f "$tmp"; echo "X 新旧配置都没有 secret"; exit 1; }
+        sed -i -E '/^secret:/d' "$tmp"; printf '%s\n' "$old_secret" >> "$tmp"
+    fi
+    sed -i -E '/^external-controller:/d' "$tmp"
+    printf 'external-controller: 127.0.0.1:9090\n' >> "$tmp"
+    if command -v mihomo >/dev/null 2>&1; then
+        mihomo -d "$(dirname "$cfg")" -t -f "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; echo "X mihomo 校验新配置失败,未改动"; exit 1; }
+        ok "mihomo 校验通过"
+    else echo "  - 未找到 mihomo 命令,跳过语法校验"; fi
+    echo "将替换 $cfg(备份 $bak),期间保镖暂停、代理短暂中断。"
+    read -r -p "继续? [y/N] " a
+    [ "$a" = "y" ] || { rm -f "$tmp"; echo "已取消"; exit 0; }
+    systemctl stop $SVC 2>/dev/null
+    cp -p "$cfg" "$bak"
+    cat "$tmp" > "$cfg"; rm -f "$tmp"
+    local rolled=0
+    rollback_yaml() {
+        echo "X $1,回滚旧配置"
+        cat "$bak" > "$cfg"; systemctl restart mihomo; sleep 4
+        cmd_sync "$cfg" >/dev/null 2>&1
+        systemctl start $SVC; exit 1
+    }
+    systemctl restart mihomo; sleep 4
+    ip addr | grep -q '198\.18\.' || rollback_yaml "mihomo0 未恢复"
+    cmd_sync "$cfg" >/dev/null || rollback_yaml "同步 API 失败"
+    local rc=2 i
+    for i in 1 2 3 4 5; do chain_check; rc=$?; [ "$rc" -ne 2 ] && break; sleep 2; done
+    [ "$rc" -eq 0 ] || rollback_yaml "API 预检失败($rc)"
+    local loc ip
+    loc=$(curl -s --max-time 8 https://www.cloudflare.com/cdn-cgi/trace | sed -n 's/^loc=//p')
+    ip=$(egress_ip)
+    { [ -n "$ip" ] && [ -n "$loc" ] && [ "$loc" != CN ]; } || rollback_yaml "新节点出口异常(国家: ${loc:-未知})"
+    ok "新节点出口国家: $loc"
+    if [ -s "$CONF/egress-allow" ]; then
+        printf '%s\n' "$ip" > "$CONF/egress-allow"; chmod 600 "$CONF/egress-allow"
+        ok "白名单已更新为新出口"
+    fi
+    systemctl start $SVC
+    if [ -s "$CONF/egress-allow" ]; then wait_guard_ok || exit 1
+    else sleep 6; [ "$(cat "$CONF/state" 2>/dev/null)" = ok ] && ok "保镖状态正常" || bad "保镖状态异常,查看 $CONF/bodyguard.log"; fi
+    echo "提示: 防火墙 kill-switch.nft 里的节点 IP 如与新节点不同,需自行同步,否则断网(fail-closed)"
+}
+
 # 子命令含 exit,放进子 shell 执行,避免退出整个菜单
 cmd_menu() {
     need_root
@@ -176,7 +232,7 @@ cmd_menu() {
         echo " 3) 更新出口白名单  4) 安装/更新 root 保镖"
         echo " 5) API 改仅本机监听 6) 清理旧配置副本"
         echo " 7) 回滚用户态保镖  8) 查看保镖日志"
-        echo " 9) 环境预检(checkdetail)   0) 退出"
+        echo " 9) 环境预检(checkdetail)   a) 更换节点配置(yaml)   0) 退出"
         read -r -p "选择: " n
         case "$n" in
             1) (cmd_status) ;;
@@ -189,6 +245,7 @@ cmd_menu() {
             7) read -r -p "用户 [$def_user]: " u; (cmd_rollback "${u:-$def_user}") ;;
             8) tail -n 20 "$CONF/bodyguard.log" 2>/dev/null || echo "  无触发记录" ;;
             9) bash "$DIR/claude-switch.sh" checkdetail ;;
+            a) read -r -p "新 yaml 路径: " u; (cmd_set_yaml "$u") ;;
             0|q|"") return 0 ;;
             *) echo "无效选择" ;;
         esac
@@ -199,6 +256,7 @@ c="${1:-}"; shift || true
 [ -z "$c" ] && [ -t 0 ] && c=menu
 case "$c" in
     menu) cmd_menu ;;
+    set-yaml) cmd_set_yaml "$@" ;;
     status) cmd_status ;;
     sync) cmd_sync "$@" ;;
     set-egress) cmd_set_egress ;;
